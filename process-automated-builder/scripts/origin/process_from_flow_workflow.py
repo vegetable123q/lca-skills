@@ -41,7 +41,9 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from tiangong_lca_spec.state_lock import hold_state_file_lock
 
-PROCESS_FROM_FLOW_ARTIFACTS_ROOT = Path("artifacts/process_from_flow")
+# Keep workflow artifacts rooted at repository level so wrapper cwd does not split
+# logs/state across different artifacts directories.
+PROCESS_FROM_FLOW_ARTIFACTS_ROOT = REPO_ROOT / "artifacts" / "process_from_flow"
 DEFAULT_SI_SUBDIR = Path("input/si")
 MINERU_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".tsv", ".xlsx", ".docx"}
@@ -68,9 +70,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-si-hint", default="possible", help="Min si_hint to download (none|possible|likely).")
     parser.add_argument("--si-max-links", type=int, help="Max SI links per DOI.")
     parser.add_argument("--si-timeout", type=float, help="HTTP timeout for SI download.")
-    parser.add_argument("--publish", action="store_true", help="Publish generated process datasets after completion.")
+    parser.add_argument(
+        "--publish",
+        dest="publish",
+        action="store_true",
+        help="Publish generated process datasets after completion (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-publish",
+        dest="publish",
+        action="store_false",
+        help="Disable publishing and keep outputs local under exports/.",
+    )
     parser.add_argument("--publish-flows", action="store_true", help="Also publish placeholder flow datasets.")
-    parser.add_argument("--commit", action="store_true", help="Actually invoke Database_CRUD_Tool (default: dry-run).")
+    parser.add_argument(
+        "--commit",
+        dest="commit",
+        action="store_true",
+        help="Commit publish actions to remote CRUD service (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-commit",
+        dest="commit",
+        action="store_false",
+        help="Publish in dry-run mode without remote commit.",
+    )
+    parser.set_defaults(publish=True, commit=True)
     parser.add_argument(
         "--stop-after",
         choices=("references", "tech", "processes", "exchanges", "matches", "sources", "datasets"),
