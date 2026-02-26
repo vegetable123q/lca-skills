@@ -160,6 +160,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Treat balance quality issues as blocking errors during publish.",
     )
+    parser.add_argument(
+        "--strict-flow-property-check",
+        action="store_true",
+        help="Treat unresolved placeholder flow-property selection as a blocking error during flow publish.",
+    )
+    parser.add_argument(
+        "--reprepare-flows",
+        action="store_true",
+        help="Allow --publish-only --publish-flows to rebuild flow publish plans from process datasets when needed.",
+    )
     return parser.parse_args()
 
 
@@ -168,6 +178,279 @@ def _load_state(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SystemExit(f"State file must contain an object: {path}")
     return payload
+
+
+def _persist_flow_publish_diagnostics_to_state(
+    *,
+    flow_property_decisions: list[dict[str, Any]],
+    held_flows: list[dict[str, Any]],
+) -> None:
+    state_path_raw = (os.getenv("TIANGONG_PFF_STATE_PATH") or "").strip()
+    if not state_path_raw:
+        return
+    state_path = Path(state_path_raw)
+    if not state_path.exists():
+        return
+    try:
+        state = _load_state(state_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] Failed to load run state for flow publish diagnostics: {exc}", file=sys.stderr)
+        return
+    state["flow_property_decisions"] = flow_property_decisions
+    state["flow_property_decision_summary"] = {
+        "total": len(flow_property_decisions),
+        "held_total": len(held_flows),
+        "held_exchanges": [
+            {
+                "process_name": item.get("process_name"),
+                "exchange_name": item.get("exchange_name"),
+                "reason": item.get("reason"),
+                "decision_mode": item.get("decision_mode"),
+            }
+            for item in held_flows[:200]
+            if isinstance(item, Mapping)
+        ],
+    }
+    try:
+        dump_json(state, state_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] Failed to persist flow publish diagnostics to run state: {exc}", file=sys.stderr)
+
+
+def _count_placeholder_flow_refs(process_datasets: list[dict[str, Any]]) -> int:
+    count = 0
+    for payload in process_datasets:
+        process_payload = payload.get("processDataSet") if isinstance(payload.get("processDataSet"), Mapping) else payload
+        if not isinstance(process_payload, Mapping):
+            continue
+        exchanges_block = process_payload.get("exchanges")
+        if not isinstance(exchanges_block, Mapping):
+            continue
+        exchanges = exchanges_block.get("exchange", [])
+        if isinstance(exchanges, Mapping):
+            exchanges = [exchanges]
+        if not isinstance(exchanges, list):
+            continue
+        for exchange in exchanges:
+            if not isinstance(exchange, Mapping):
+                continue
+            ref = exchange.get("referenceToFlowDataSet")
+            if isinstance(ref, Mapping) and ref.get("unmatched:placeholder"):
+                count += 1
+    return count
+
+
+def _collect_placeholder_flow_refs(
+    process_datasets: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    def _process_name_from_payload(process_payload: Mapping[str, Any]) -> str:
+        process_info = process_payload.get("processInformation")
+        if not isinstance(process_info, Mapping):
+            return "Unknown process"
+        dsi = process_info.get("dataSetInformation")
+        if not isinstance(dsi, Mapping):
+            return "Unknown process"
+        name_block = dsi.get("name")
+        if not isinstance(name_block, Mapping):
+            return "Unknown process"
+        base_name = name_block.get("baseName")
+        if isinstance(base_name, Mapping):
+            text = base_name.get("#text")
+            return str(text) if isinstance(text, str) and text.strip() else "Unknown process"
+        if isinstance(base_name, list):
+            for item in base_name:
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("@xml:lang") != "en":
+                    continue
+                text = item.get("#text")
+                if isinstance(text, str) and text.strip():
+                    return text
+            for item in base_name:
+                if not isinstance(item, Mapping):
+                    continue
+                text = item.get("#text")
+                if isinstance(text, str) and text.strip():
+                    return text
+        return "Unknown process"
+
+    def _short_desc_from_ref(ref: Mapping[str, Any]) -> str:
+        desc = ref.get("common:shortDescription")
+        if isinstance(desc, Mapping):
+            text = desc.get("#text")
+            return str(text) if isinstance(text, str) and text.strip() else "Unnamed exchange"
+        if isinstance(desc, list):
+            for item in desc:
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("@xml:lang") != "en":
+                    continue
+                text = item.get("#text")
+                if isinstance(text, str) and text.strip():
+                    return text
+            for item in desc:
+                if not isinstance(item, Mapping):
+                    continue
+                text = item.get("#text")
+                if isinstance(text, str) and text.strip():
+                    return text
+        return "Unnamed exchange"
+
+    results: list[dict[str, str]] = []
+    for payload in process_datasets:
+        process_payload = payload.get("processDataSet") if isinstance(payload.get("processDataSet"), Mapping) else payload
+        if not isinstance(process_payload, Mapping):
+            continue
+        process_name = _process_name_from_payload(process_payload)
+        exchanges_block = process_payload.get("exchanges")
+        if not isinstance(exchanges_block, Mapping):
+            continue
+        exchanges = exchanges_block.get("exchange", [])
+        if isinstance(exchanges, Mapping):
+            exchanges = [exchanges]
+        if not isinstance(exchanges, list):
+            continue
+        for exchange in exchanges:
+            if not isinstance(exchange, Mapping):
+                continue
+            ref = exchange.get("referenceToFlowDataSet")
+            if not (isinstance(ref, Mapping) and ref.get("unmatched:placeholder")):
+                continue
+            exchange_name = _short_desc_from_ref(ref)
+            results.append(
+                {
+                    "process_name": process_name or "Unknown process",
+                    "exchange_name": exchange_name or "Unnamed exchange",
+                    "uuid": str(ref.get("@refObjectId") or ""),
+                    "version": str(ref.get("@version") or ""),
+                }
+            )
+            if len(results) >= limit:
+                return results
+    return results
+
+
+def _format_placeholder_flow_refs(refs: list[dict[str, str]]) -> str:
+    if not refs:
+        return ""
+    details = "; ".join(
+        (
+            f"{item.get('exchange_name') or 'Unnamed exchange'}"
+            f" ({item.get('uuid') or 'unknown-uuid'}@{item.get('version') or '*'})"
+            f" in {item.get('process_name') or 'Unknown process'}"
+        )
+        for item in refs
+    )
+    return details
+
+
+def _flow_publish_plan_cache_path(cache_dir: Path) -> Path:
+    return cache_dir / "flow_publish_plans.json"
+
+
+def _serialize_flow_publish_plans(
+    plans: list[Any],
+    *,
+    flow_property_decisions: list[dict[str, Any]] | None = None,
+    held_flows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    serialized_plans: list[dict[str, Any]] = []
+    for plan in plans:
+        uuid_value = getattr(plan, "uuid", None)
+        exchange_name = getattr(plan, "exchange_name", None)
+        process_name = getattr(plan, "process_name", None)
+        dataset = getattr(plan, "dataset", None)
+        exchange_ref = getattr(plan, "exchange_ref", None)
+        mode = getattr(plan, "mode", None)
+        flow_property_uuid = getattr(plan, "flow_property_uuid", None)
+        if not isinstance(uuid_value, str) or not uuid_value.strip():
+            continue
+        if not isinstance(exchange_name, str):
+            exchange_name = "Unnamed exchange"
+        if not isinstance(process_name, str):
+            process_name = "Unknown process"
+        if not isinstance(dataset, Mapping) or not isinstance(exchange_ref, Mapping):
+            continue
+        serialized_plans.append(
+            {
+                "uuid": uuid_value,
+                "exchange_name": exchange_name,
+                "process_name": process_name,
+                "dataset": dict(dataset),
+                "exchange_ref": dict(exchange_ref),
+                "mode": mode if isinstance(mode, str) and mode else "insert",
+                "flow_property_uuid": flow_property_uuid if isinstance(flow_property_uuid, str) and flow_property_uuid else None,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "plan_count": len(serialized_plans),
+        "plans": serialized_plans,
+        "flow_property_decisions": flow_property_decisions or [],
+        "held_flows": held_flows or [],
+    }
+
+
+def _write_flow_publish_plan_cache(
+    cache_dir: Path,
+    plans: list[Any],
+    *,
+    flow_property_decisions: list[dict[str, Any]] | None = None,
+    held_flows: list[dict[str, Any]] | None = None,
+) -> Path:
+    payload = _serialize_flow_publish_plans(
+        plans,
+        flow_property_decisions=flow_property_decisions,
+        held_flows=held_flows,
+    )
+    target = _flow_publish_plan_cache_path(cache_dir)
+    dump_json(payload, target)
+    return target
+
+
+def _load_flow_publish_plan_cache(cache_dir: Path) -> tuple[list[Any], dict[str, Any]]:
+    target = _flow_publish_plan_cache_path(cache_dir)
+    if not target.exists():
+        raise FileNotFoundError(target)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Flow publish plan cache must be a JSON object: {target}")
+    plans_raw = payload.get("plans")
+    if not isinstance(plans_raw, list):
+        raise SystemExit(f"Flow publish plan cache missing 'plans' list: {target}")
+
+    from tiangong_lca_spec.publishing import FlowPublishPlan
+
+    plans: list[Any] = []
+    for item in plans_raw:
+        if not isinstance(item, Mapping):
+            continue
+        uuid_value = item.get("uuid")
+        exchange_name = item.get("exchange_name")
+        process_name = item.get("process_name")
+        dataset = item.get("dataset")
+        exchange_ref = item.get("exchange_ref")
+        mode = item.get("mode")
+        flow_property_uuid = item.get("flow_property_uuid")
+        if not isinstance(uuid_value, str) or not uuid_value.strip():
+            continue
+        if not isinstance(dataset, Mapping) or not isinstance(exchange_ref, Mapping):
+            continue
+        plans.append(
+            FlowPublishPlan(
+                uuid=uuid_value.strip(),
+                exchange_name=(exchange_name if isinstance(exchange_name, str) else "Unnamed exchange"),
+                process_name=(process_name if isinstance(process_name, str) else "Unknown process"),
+                dataset=dict(dataset),
+                exchange_ref=dict(exchange_ref),
+                mode=(mode if isinstance(mode, str) and mode else "insert"),
+                flow_property_uuid=(flow_property_uuid if isinstance(flow_property_uuid, str) and flow_property_uuid else None),
+            )
+        )
+    return plans, payload
 
 
 def _extract_process_uuid(process_payload: dict[str, Any]) -> str:
@@ -645,36 +928,97 @@ def _apply_flow_refs_to_processes(datasets: list[dict[str, Any]], plans: list[An
     return updated
 
 
-def _publish_flows(
+def _prepare_flow_publish_plans(
     datasets: list[dict[str, Any]],
     *,
-    commit: bool,
     llm: Any | None = None,
+    cache_dir: Path | None = None,
     exports_dir: Path | None = None,
+    strict_flow_property_check: bool = False,
 ) -> list[Any]:
     from tiangong_lca_spec.publishing import FlowPublisher
 
     alignment = _build_flow_alignment_from_process_datasets(datasets)
     if not alignment:
         return []
-    publisher = FlowPublisher(dry_run=not commit, llm=llm)
+    publisher = FlowPublisher(
+        dry_run=True,
+        llm=llm,
+        strict_flow_property_check=strict_flow_property_check,
+    )
     try:
         plans = publisher.prepare_from_alignment(alignment)
+        held_flows = publisher.held_flows
+        diagnostics = publisher.flow_property_decisions
+        _persist_flow_publish_diagnostics_to_state(
+            flow_property_decisions=diagnostics,
+            held_flows=held_flows,
+        )
+        if cache_dir is not None:
+            cache_path = _write_flow_publish_plan_cache(
+                cache_dir,
+                plans,
+                flow_property_decisions=diagnostics,
+                held_flows=held_flows,
+            )
+            print(f"Cached {len(plans)} flow publish plan(s) at {cache_path}", file=sys.stderr)
+        if held_flows:
+            preview = "; ".join(
+                f"{item.get('exchange_name')} ({item.get('reason')})"
+                for item in held_flows[:5]
+                if isinstance(item, Mapping)
+            )
+            print(
+                f"[warn] Held {len(held_flows)} flow(s) for manual review due to unresolved flow-property selection."
+                + (f" {preview}" if preview else ""),
+                file=sys.stderr,
+            )
         if not plans:
             return []
         if exports_dir is not None:
             _write_flow_exports(plans, exports_dir)
+        return plans
+    finally:
+        publisher.close()
+
+
+def _publish_prepared_flow_plans(plans: list[Any], *, commit: bool) -> None:
+    from tiangong_lca_spec.publishing import FlowPublisher
+
+    if not plans:
+        return
+    publisher = FlowPublisher(dry_run=not commit)
+    try:
         try:
-            publisher.publish()
+            publisher.publish_prepared(plans)
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] Flow publish encountered errors but will continue: {exc}", file=sys.stderr)
         if commit:
             print(f"Attempted publish for {len(plans)} flow dataset(s) via Database_CRUD_Tool.", file=sys.stderr)
         else:
             print(f"Dry-run: prepared {len(plans)} flow dataset(s) for publish.", file=sys.stderr)
-        return plans
     finally:
         publisher.close()
+
+
+def _publish_flows(
+    datasets: list[dict[str, Any]],
+    *,
+    commit: bool,
+    llm: Any | None = None,
+    cache_dir: Path | None = None,
+    exports_dir: Path | None = None,
+    strict_flow_property_check: bool = False,
+) -> list[Any]:
+    plans = _prepare_flow_publish_plans(
+        datasets,
+        llm=llm,
+        cache_dir=cache_dir,
+        exports_dir=exports_dir,
+        strict_flow_property_check=strict_flow_property_check,
+    )
+    _publish_prepared_flow_plans(plans, commit=commit)
+    return plans
 
 
 def _write_flow_exports(plans: list[Any], exports_dir: Path) -> list[Path]:
@@ -917,19 +1261,68 @@ def main() -> None:
         if not args.skip_balance_check:
             _enforce_balance_quality_gate(run_id, strict=args.strict_balance_check)
         llm = None
-        if args.publish_flows and not args.no_llm:
+        if args.publish_flows and args.reprepare_flows and not args.no_llm:
             api_key, model, base_url = load_openai_from_env()
             llm = OpenAIResponsesLLM(api_key=api_key, model=model, base_url=base_url)
         source_datasets = _load_source_datasets(run_id)
         datasets = _load_process_datasets(run_id)
         _export_referenced_flows_from_processes(datasets, exports_dir)
         if args.publish_flows:
-            flow_plans = _publish_flows(datasets, commit=args.commit, llm=llm, exports_dir=exports_dir)
+            flow_plans: list[Any]
+            if args.reprepare_flows:
+                flow_plans = _publish_flows(
+                    datasets,
+                    commit=args.commit,
+                    llm=llm,
+                    cache_dir=cache_dir,
+                    exports_dir=exports_dir,
+                    strict_flow_property_check=args.strict_flow_property_check,
+                )
+            else:
+                try:
+                    flow_plans, flow_plan_cache = _load_flow_publish_plan_cache(cache_dir)
+                except FileNotFoundError:
+                    raise SystemExit(
+                        "Missing cached flow publish plans for --publish-only --publish-flows. "
+                        "Run a prior prepare/publish step that writes cache, or pass --reprepare-flows."
+                    )
+                _persist_flow_publish_diagnostics_to_state(
+                    flow_property_decisions=flow_plan_cache.get("flow_property_decisions")
+                    if isinstance(flow_plan_cache.get("flow_property_decisions"), list)
+                    else [],
+                    held_flows=flow_plan_cache.get("held_flows")
+                    if isinstance(flow_plan_cache.get("held_flows"), list)
+                    else [],
+                )
+                if exports_dir is not None and flow_plans:
+                    _write_flow_exports(flow_plans, exports_dir)
+                _publish_prepared_flow_plans(flow_plans, commit=args.commit)
             if args.commit and flow_plans:
                 updated = _apply_flow_refs_to_processes(datasets, flow_plans)
                 if updated:
                     _write_process_exports(datasets, exports_dir)
                     _export_referenced_flows_from_processes(datasets, exports_dir)
+            if args.commit:
+                remaining_placeholders = _count_placeholder_flow_refs(datasets)
+                if remaining_placeholders:
+                    unresolved_refs = _collect_placeholder_flow_refs(datasets)
+                    unresolved_detail = _format_placeholder_flow_refs(unresolved_refs)
+                    message = (
+                        "Flow publish left "
+                        f"{remaining_placeholders} placeholder flow reference(s) unresolved "
+                        "(manual review/hold likely required)."
+                    )
+                    if unresolved_detail:
+                        message = f"{message} unresolved={unresolved_detail}"
+                    if args.strict_flow_property_check:
+                        raise SystemExit(f"{message} Abort source/process publish (strict mode).")
+                    print(
+                        (
+                            f"[warn] {message} Continuing source/process publish because "
+                            "--strict-flow-property-check is disabled."
+                        ),
+                        file=sys.stderr,
+                    )
         if source_datasets:
             _publish_sources(source_datasets, commit=args.commit, process_datasets=datasets)
         _publish_processes(datasets, commit=args.commit)
@@ -1053,12 +1446,40 @@ def main() -> None:
         if not args.skip_balance_check:
             _enforce_balance_quality_gate(run_id, strict=args.strict_balance_check)
         if args.publish_flows:
-            flow_plans = _publish_flows(datasets, commit=args.commit, llm=llm, exports_dir=exports_dir)
+            flow_plans = _publish_flows(
+                datasets,
+                commit=args.commit,
+                llm=llm,
+                cache_dir=cache_dir,
+                exports_dir=exports_dir,
+                strict_flow_property_check=args.strict_flow_property_check,
+            )
             if args.commit and flow_plans:
                 updated = _apply_flow_refs_to_processes(datasets, flow_plans)
                 if updated:
                     _write_process_exports(datasets, exports_dir)
                     _export_referenced_flows_from_processes(datasets, exports_dir)
+            if args.commit:
+                remaining_placeholders = _count_placeholder_flow_refs(datasets)
+                if remaining_placeholders:
+                    unresolved_refs = _collect_placeholder_flow_refs(datasets)
+                    unresolved_detail = _format_placeholder_flow_refs(unresolved_refs)
+                    message = (
+                        "Flow publish left "
+                        f"{remaining_placeholders} placeholder flow reference(s) unresolved "
+                        "(manual review/hold likely required)."
+                    )
+                    if unresolved_detail:
+                        message = f"{message} unresolved={unresolved_detail}"
+                    if args.strict_flow_property_check:
+                        raise SystemExit(f"{message} Abort source/process publish (strict mode).")
+                    print(
+                        (
+                            f"[warn] {message} Continuing source/process publish because "
+                            "--strict-flow-property-check is disabled."
+                        ),
+                        file=sys.stderr,
+                    )
         if isinstance(source_payloads, list) and source_payloads:
             _publish_sources(source_payloads, commit=args.commit, process_datasets=datasets)
         _publish_processes(datasets, commit=args.commit)
