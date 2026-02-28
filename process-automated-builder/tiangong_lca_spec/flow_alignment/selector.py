@@ -121,7 +121,7 @@ class LLMCandidateSelector:
         "\n"
         "Respond with `best_index: null` if no candidate is appropriate. Prefer candidates whose flow "
         "name, geography, classification, and general comments best align with the exchange details. "
-        "The exchange may include `flow_type`, `material_role`, `exchangeDirection`, `is_reference_flow`, "
+        "The exchange may include `flow_type`, `material_role`, `io_kind_tag`, `exchangeDirection`, `is_reference_flow`, "
         "`reference_flow_name`, and `search_hints` aliases; use them. "
         "Candidates include `name_parts` (baseName, treatmentStandardsRoutes, mixAndLocationTypes, flowProperties) and "
         "`flow_type`.\n"
@@ -206,6 +206,7 @@ class LLMCandidateSelector:
                 "general_comment": self._stringify_comment(exchange),
                 "flow_type": exchange.get("flow_type"),
                 "material_role": exchange.get("material_role"),
+                "io_kind_tag": exchange.get("io_kind_tag") or exchange.get("ioKindTag"),
                 "search_hints": exchange.get("search_hints") or [],
             },
             "candidates": [

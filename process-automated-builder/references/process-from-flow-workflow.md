@@ -76,6 +76,8 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 4) match_flows
 - Search flows for each exchange (top 10 candidates); use LLM selector when available, fallback to `SimilarityCandidateSelector` when no LLM.
 - Record `flow_search.query/candidates/selected_uuid/selected_reason/selector/unmatched` and fill `uuid/shortDescription`.
+- Apply staged routing filters before selection: `flow_type` first, then for elementary flows enforce `Input->resource / Output->emission`, and for emissions prefer `air/water/soil` compartment hints.
+- If strict filtering yields no candidate, relax in order: compartment -> elementary kind -> cross-type fallback (cross-type fallback marks `manual_review_required`).
 - Only add matching info; do not overwrite `data_source` and `evidence`.
 
 4b) align_exchange_units
@@ -107,7 +109,7 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 6) resolve_placeholders (post-processing)
 - After `build_process_datasets`, scan exchanges with `referenceToFlowDataSet.unmatched:placeholder=true`.
 - Rebuild a secondary `flow_search` query from `exchangeName/Direction/unit/flow_type/search_hints/generalComment`.
-- Filter candidates by `flow_type`; for elementary flows also filter by medium (`air/water/soil`).
+- Filter candidates with the same staged routing policy as Step 4 (`flow_type`, elementary kind, then emission compartment with progressive relaxation).
 - Use selector (LLM/Rule) to choose; write `flow_search.secondary_query/resolution_*` and update process datasets.
 - If still unmatched, keep placeholder and record `resolution_status/reason` for review.
 

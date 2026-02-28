@@ -101,6 +101,7 @@ from tiangong_lca_spec.process_extraction.tidas_mapping import (
 )
 from tiangong_lca_spec.publishing.crud import DatabaseCrudClient
 from tiangong_lca_spec.state_lock import StateFileLockTimeout, hold_state_file_lock
+from tiangong_lca_spec.tidas.elementary_flow_classification_registry import infer_elementary_kind_and_compartment
 from tiangong_lca_spec.utils.translate import Translator
 
 from .prompts import (
@@ -179,8 +180,18 @@ class FlowReferenceInfo:
     unit_group: UnitGroupInfo | None
 
 
+@dataclass(frozen=True, slots=True)
+class FlowMatchRoutingResult:
+    candidates: list[FlowCandidate]
+    routing_decision: dict[str, Any]
+    compartment_decision: dict[str, Any]
+    manual_review_required: bool
+    trace: list[dict[str, Any]]
+
+
 _FLOW_PROPERTY_CACHE: dict[str, FlowPropertyInfo] = {}
 _UNIT_GROUP_CACHE: dict[str, UnitGroupInfo] = {}
+_ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED = False
 
 
 FLOW_QUERY_REWRITE_PROMPT = (
@@ -4765,6 +4776,234 @@ def _coerce_classification_hints(value: Any, *, max_items: int = 6) -> list[str]
     return hints
 
 
+def _candidate_classification_texts(candidate: FlowCandidate) -> list[str]:
+    texts: list[str] = []
+    if isinstance(candidate.classification, list):
+        for entry in candidate.classification:
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get("#text") or entry.get("text") or "").strip()
+            if text and text not in texts:
+                texts.append(text)
+    category_path = str(candidate.category_path or "").strip()
+    if category_path:
+        for part in category_path.split(">"):
+            cleaned = str(part).strip()
+            if cleaned and cleaned not in texts:
+                texts.append(cleaned)
+    return texts
+
+
+def _candidate_elementary_kind_and_compartment(candidate: FlowCandidate) -> tuple[str | None, str | None]:
+    global _ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED
+    try:
+        kind, compartment = infer_elementary_kind_and_compartment(
+            candidate.classification if isinstance(candidate.classification, list) else None,
+            category_path=str(candidate.category_path or "").strip() or None,
+            general_comment=str(candidate.general_comment or "").strip() or None,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        if not _ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED:
+            LOGGER.warning("process_from_flow.elementary_category_inference_failed", error=str(exc))
+            _ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED = True
+        kind, compartment = None, None
+    if kind is None:
+        combined_text = " ".join(
+            [
+                str(candidate.category_path or ""),
+                str(candidate.general_comment or ""),
+                " ".join(_candidate_classification_texts(candidate)),
+            ]
+        ).lower()
+        if "resource" in combined_text:
+            kind = "resource"
+        elif "emission" in combined_text:
+            kind = "emission"
+    if kind == "emission" and compartment is None:
+        combined_text = " ".join(
+            [
+                str(candidate.category_path or ""),
+                str(candidate.general_comment or ""),
+                " ".join(_candidate_classification_texts(candidate)),
+            ]
+        )
+        compartment = _normalize_compartment_value(_infer_media_suffix(combined_text))
+    if kind != "emission":
+        compartment = None
+    return kind, compartment
+
+
+def _expected_elementary_kind_for_routing(
+    *,
+    expected_flow_type: str | None,
+    direction: str | None,
+    io_kind_tag: str | None,
+) -> str | None:
+    normalized_kind = _normalize_io_kind_tag(io_kind_tag)
+    if normalized_kind in {"resource", "emission"}:
+        return normalized_kind
+    if expected_flow_type != "elementary":
+        return None
+    if direction == "Input":
+        return "resource"
+    if direction == "Output":
+        return "emission"
+    return None
+
+
+def _route_flow_match_candidates(
+    candidates: list[FlowCandidate],
+    *,
+    expected_flow_type: str | None,
+    direction: str | None,
+    io_kind_tag: str | None,
+    expected_compartment: str | None,
+) -> FlowMatchRoutingResult:
+    source = [candidate for candidate in candidates if isinstance(candidate, FlowCandidate)]
+    normalized_type = _normalize_flow_type(expected_flow_type)
+    normalized_direction = _normalize_exchange_direction_value(direction)
+    normalized_io_kind = _normalize_io_kind_tag(io_kind_tag)
+    elementary_kind = _expected_elementary_kind_for_routing(
+        expected_flow_type=normalized_type,
+        direction=normalized_direction,
+        io_kind_tag=normalized_io_kind,
+    )
+    compartment = _normalize_compartment_value(expected_compartment)
+    if elementary_kind != "emission":
+        compartment = None
+
+    trace: list[dict[str, Any]] = []
+    metadata_cache: dict[int, tuple[str | None, str | None, str | None]] = {}
+
+    def _candidate_metadata(candidate: FlowCandidate) -> tuple[str | None, str | None, str | None]:
+        key = id(candidate)
+        cached = metadata_cache.get(key)
+        if cached is not None:
+            return cached
+        candidate_type = _normalize_flow_type(candidate.flow_type)
+        candidate_kind, candidate_compartment = _candidate_elementary_kind_and_compartment(candidate)
+        metadata = (candidate_type, candidate_kind, candidate_compartment)
+        metadata_cache[key] = metadata
+        return metadata
+
+    def _apply_stage(
+        stage: str,
+        values: list[FlowCandidate],
+        *,
+        apply_type: bool,
+        apply_kind: bool,
+        apply_compartment: bool,
+    ) -> list[FlowCandidate]:
+        filtered: list[FlowCandidate] = []
+        for candidate in values:
+            candidate_type, candidate_kind, candidate_compartment = _candidate_metadata(candidate)
+            if apply_type and normalized_type and candidate_type != normalized_type:
+                continue
+            if apply_kind and elementary_kind and candidate_kind != elementary_kind:
+                continue
+            if apply_compartment and compartment and candidate_compartment != compartment:
+                continue
+            filtered.append(candidate)
+        filters_applied: list[str] = []
+        if apply_type and normalized_type:
+            filters_applied.append(f"flow_type={normalized_type}")
+        if apply_kind and elementary_kind:
+            filters_applied.append(f"elementary_kind={elementary_kind}")
+        if apply_compartment and compartment:
+            filters_applied.append(f"compartment={compartment}")
+        trace.append(
+            {
+                "stage": stage,
+                "before": len(values),
+                "after": len(filtered),
+                "filters": filters_applied,
+            }
+        )
+        return filtered
+
+    selected = list(source)
+    selected_stage = "no_filter"
+    manual_review_required = False
+
+    has_constraints = bool(normalized_type or elementary_kind or compartment)
+    if has_constraints:
+        strict = _apply_stage(
+            "strict",
+            source,
+            apply_type=True,
+            apply_kind=True,
+            apply_compartment=True,
+        )
+        if strict:
+            selected = strict
+            selected_stage = "strict"
+        else:
+            if compartment:
+                relaxed_compartment = _apply_stage(
+                    "relax_compartment",
+                    source,
+                    apply_type=True,
+                    apply_kind=True,
+                    apply_compartment=False,
+                )
+                if relaxed_compartment:
+                    selected = relaxed_compartment
+                    selected_stage = "relax_compartment"
+            if selected_stage == "no_filter" and elementary_kind:
+                relaxed_kind = _apply_stage(
+                    "relax_elementary_kind",
+                    source,
+                    apply_type=True,
+                    apply_kind=False,
+                    apply_compartment=False,
+                )
+                if relaxed_kind:
+                    selected = relaxed_kind
+                    selected_stage = "relax_elementary_kind"
+            if selected_stage == "no_filter" and normalized_type:
+                cross_type_with_kind = _apply_stage(
+                    "cross_type_keep_kind",
+                    source,
+                    apply_type=False,
+                    apply_kind=bool(elementary_kind),
+                    apply_compartment=bool(compartment and elementary_kind == "emission"),
+                )
+                if cross_type_with_kind:
+                    selected = cross_type_with_kind
+                    selected_stage = "cross_type_keep_kind"
+            if selected_stage == "no_filter":
+                selected = _apply_stage(
+                    "cross_type_unfiltered",
+                    source,
+                    apply_type=False,
+                    apply_kind=False,
+                    apply_compartment=False,
+                )
+                selected_stage = "cross_type_unfiltered"
+
+    if selected_stage in {"relax_elementary_kind", "cross_type_keep_kind", "cross_type_unfiltered"}:
+        manual_review_required = True
+
+    return FlowMatchRoutingResult(
+        candidates=selected,
+        routing_decision={
+            "expected_flow_type": normalized_type,
+            "expected_elementary_kind": elementary_kind,
+            "direction": normalized_direction,
+            "io_kind_tag": normalized_io_kind,
+            "selected_stage": selected_stage,
+            "candidate_total": len(source),
+            "selected_total": len(selected),
+        },
+        compartment_decision={
+            "expected_compartment": compartment,
+            "selected_stage": selected_stage if compartment else None,
+        },
+        manual_review_required=manual_review_required,
+        trace=trace,
+    )
+
+
 def _compose_placeholder_query_text(
     *,
     exchange_name: str,
@@ -4773,6 +5012,7 @@ def _compose_placeholder_query_text(
     classification_hints: list[str] | None,
     flow_type: str | None,
     direction: str | None,
+    io_kind: str | None,
     unit: str | None,
     compartment: str | None,
 ) -> str:
@@ -4788,6 +5028,8 @@ def _compose_placeholder_query_text(
         constraint_bits.append(f"flow_type={flow_type}")
     if direction:
         constraint_bits.append(f"direction={direction}")
+    if io_kind:
+        constraint_bits.append(f"io_kind={io_kind}")
     if unit:
         constraint_bits.append(f"unit={unit}")
     if compartment:
@@ -4808,6 +5050,8 @@ def _compose_placeholder_query_text(
         parts.append(f"flow_type: {flow_type}")
     if direction:
         parts.append(f"direction: {direction}")
+    if io_kind:
+        parts.append(f"io_kind: {io_kind}")
     if unit:
         parts.append(f"unit: {unit}")
     if compartment:
@@ -4822,12 +5066,14 @@ def _build_placeholder_one_shot_query_payload(
     comment: str | None,
     flow_type: str | None,
     direction: str | None,
+    io_kind_tag: str | None,
     unit: str | None,
     expected_compartment: str | None,
     search_hints: list[str] | None,
 ) -> dict[str, Any]:
     fallback_flow_type = _normalize_flow_type(flow_type)
     fallback_direction = _normalize_exchange_direction_value(direction)
+    fallback_io_kind = _normalize_io_kind_tag(io_kind_tag)
     fallback_unit = str(unit or "").strip() or None
     fallback_compartment = _normalize_compartment_value(expected_compartment) or _infer_media_suffix(f"{exchange_name} {comment or ''}")
     fallback_cas = _extract_cas_number([exchange_name, comment, search_hints or []])
@@ -4840,6 +5086,7 @@ def _build_placeholder_one_shot_query_payload(
         "classification_hints": fallback_hints,
         "flow_type": fallback_flow_type,
         "direction": fallback_direction,
+        "io_kind": fallback_io_kind,
         "unit": fallback_unit,
         "compartment": fallback_compartment,
     }
@@ -4851,6 +5098,7 @@ def _build_placeholder_one_shot_query_payload(
                 "general_comment": comment,
                 "flow_type": fallback_flow_type,
                 "direction": fallback_direction,
+                "io_kind": fallback_io_kind,
                 "unit": fallback_unit,
                 "compartment": fallback_compartment,
                 "search_hints": search_hints or [],
@@ -4872,6 +5120,7 @@ def _build_placeholder_one_shot_query_payload(
         payload["classification_hints"] = _coerce_classification_hints(data.get("classification_hints") or data.get("classification") or payload["classification_hints"])
         payload["flow_type"] = _normalize_flow_type(data.get("flow_type")) or payload["flow_type"]
         payload["direction"] = _normalize_exchange_direction_value(data.get("direction")) or payload["direction"]
+        payload["io_kind"] = _normalize_io_kind_tag(data.get("io_kind")) or payload["io_kind"]
         payload["unit"] = str(data.get("unit") or payload["unit"] or "").strip() or payload["unit"]
         payload["compartment"] = _normalize_compartment_value(data.get("compartment")) or payload["compartment"]
 
@@ -4882,6 +5131,7 @@ def _build_placeholder_one_shot_query_payload(
         classification_hints=payload.get("classification_hints") if isinstance(payload.get("classification_hints"), list) else [],
         flow_type=payload.get("flow_type"),
         direction=payload.get("direction"),
+        io_kind=payload.get("io_kind"),
         unit=payload.get("unit"),
         compartment=payload.get("compartment"),
     )
@@ -7593,16 +7843,19 @@ def _build_langgraph(
                     name = str(exchange.get("exchangeName") or "").strip()
                     comment = _strip_exchange_comment_tags(exchange.get("generalComment")) or None
                     flow_type = _normalize_flow_type(exchange.get("flow_type")) or None
-                    direction = str(exchange.get("exchangeDirection") or "").strip() or None
+                    direction = _normalize_exchange_direction_value(exchange.get("exchangeDirection")) or str(exchange.get("exchangeDirection") or "").strip() or None
                     unit = str(exchange.get("unit") or "").strip() or None
                     search_hints = exchange.get("search_hints") or []
                     expected_compartment = _infer_media_suffix(f"{name} {comment or ''}")
+                    io_kind_tag = _exchange_kind_for_comment_tag(exchange, direction=str(direction or ""))
 
                     constraint_bits: list[str] = []
                     if flow_type:
                         constraint_bits.append(f"flow_type={flow_type}")
                     if direction:
                         constraint_bits.append(f"direction={direction}")
+                    if io_kind_tag:
+                        constraint_bits.append(f"io_kind={io_kind_tag}")
                     if unit:
                         constraint_bits.append(f"unit={unit}")
                     if expected_compartment:
@@ -7625,6 +7878,10 @@ def _build_langgraph(
                             "comment": comment,
                             "query_desc": query_desc,
                             "query": query,
+                            "flow_type": flow_type,
+                            "direction": direction,
+                            "io_kind_tag": io_kind_tag,
+                            "expected_compartment": expected_compartment,
                         }
                     )
 
@@ -7646,10 +7903,21 @@ def _build_langgraph(
                     comment = item["comment"]
                     query_desc = item["query_desc"]
                     query = item["query"]
+                    flow_type = item.get("flow_type")
+                    direction = item.get("direction")
+                    io_kind_tag = item.get("io_kind_tag")
+                    expected_compartment = item.get("expected_compartment")
                     candidates, unmatched = item["search_result"]
 
                     candidates = _dedupe_candidates_by_uuid_version(candidates)
-                    candidates = candidates[:10]
+                    route = _route_flow_match_candidates(
+                        candidates,
+                        expected_flow_type=flow_type,
+                        direction=direction,
+                        io_kind_tag=io_kind_tag,
+                        expected_compartment=expected_compartment,
+                    )
+                    candidates = route.candidates[:10]
                     # Build a minimal exchange dict for selector context.
                     selector_exchange = {
                         "exchangeName": query.exchange_name,
@@ -7659,6 +7927,7 @@ def _build_langgraph(
                         "reference_flow_name": reference_flow_name,
                         "flow_type": exchange.get("flow_type"),
                         "material_role": exchange.get("material_role"),
+                        "io_kind_tag": io_kind_tag,
                         "search_hints": exchange.get("search_hints") or [],
                     }
                     decision = selector.select(query, selector_exchange, candidates)
@@ -7694,6 +7963,10 @@ def _build_langgraph(
                                 "selected_uuid": selected.uuid if selected else None,
                                 "selected_reason": selected_reason,
                                 "selector": decision.strategy,
+                                "routing_decision": route.routing_decision,
+                                "compartment_decision": route.compartment_decision,
+                                "manual_review_required": route.manual_review_required,
+                                "routing_trace": route.trace,
                                 "unmatched": [getattr(entry, "base_name", None) for entry in (unmatched or [])],
                             },
                         }
@@ -8766,10 +9039,11 @@ def _build_langgraph(
                 exchange_name = str(matched_exchange.get("exchangeName") or entry.get("exchange_name") or "").strip()
                 comment = _strip_exchange_comment_tags(matched_exchange.get("generalComment"))
                 flow_type = _normalize_flow_type(matched_exchange.get("flow_type")) or matched_exchange.get("flow_type")
-                direction = str(matched_exchange.get("exchangeDirection") or "").strip()
+                direction = _normalize_exchange_direction_value(matched_exchange.get("exchangeDirection")) or str(matched_exchange.get("exchangeDirection") or "").strip()
                 unit = str(matched_exchange.get("unit") or "").strip()
                 search_hints = matched_exchange.get("search_hints") if isinstance(matched_exchange.get("search_hints"), list) else []
                 expected_compartment = _infer_media_suffix(f"{exchange_name} {comment}")
+                io_kind_tag = _exchange_kind_for_comment_tag(matched_exchange, direction=str(direction or ""))
 
                 query_payload = _build_placeholder_one_shot_query_payload(
                     llm=llm,
@@ -8777,6 +9051,7 @@ def _build_langgraph(
                     comment=comment,
                     flow_type=flow_type,
                     direction=direction,
+                    io_kind_tag=io_kind_tag,
                     unit=unit,
                     expected_compartment=expected_compartment,
                     search_hints=search_hints,
@@ -8803,12 +9078,23 @@ def _build_langgraph(
                             error=search_error,
                         )
                 candidates = _dedupe_candidates_by_uuid_version(candidates)
-                selection_candidates = candidates[:10]
+                route = _route_flow_match_candidates(
+                    candidates,
+                    expected_flow_type=flow_type,
+                    direction=direction,
+                    io_kind_tag=io_kind_tag,
+                    expected_compartment=expected_compartment,
+                )
+                selection_candidates = route.candidates[:10]
                 filter_info = {
-                    "mode": "disabled",
-                    "reason": "one_shot_top10_direct_to_selector",
-                    "expected_flow_type": flow_type,
-                    "expected_compartment": expected_compartment,
+                    "mode": "route_policy",
+                    "reason": "type_kind_compartment_progressive_relaxation",
+                    "expected_flow_type": route.routing_decision.get("expected_flow_type"),
+                    "expected_elementary_kind": route.routing_decision.get("expected_elementary_kind"),
+                    "expected_compartment": route.compartment_decision.get("expected_compartment"),
+                    "selected_stage": route.routing_decision.get("selected_stage"),
+                    "manual_review_required": route.manual_review_required,
+                    "trace": route.trace,
                     "candidate_total": len(selection_candidates),
                 }
 
@@ -8816,6 +9102,7 @@ def _build_langgraph(
                     "exchangeName": exchange_name,
                     "generalComment": comment,
                     "flow_type": flow_type,
+                    "io_kind_tag": io_kind_tag,
                     "search_hints": search_hints,
                     "exchangeDirection": direction,
                 }
@@ -8879,6 +9166,7 @@ def _build_langgraph(
                     "classification_hints": query_payload.get("classification_hints"),
                     "flow_type": query_payload.get("flow_type"),
                     "direction": query_payload.get("direction"),
+                    "io_kind": query_payload.get("io_kind"),
                     "unit": query_payload.get("unit"),
                     "compartment": query_payload.get("compartment"),
                 }
@@ -8889,6 +9177,10 @@ def _build_langgraph(
                 flow_search["resolution_candidates"] = candidate_list
                 flow_search["resolution_raw_candidates"] = raw_candidate_list
                 flow_search["resolution_filters"] = filter_info
+                flow_search["routing_decision"] = route.routing_decision
+                flow_search["compartment_decision"] = route.compartment_decision
+                flow_search["manual_review_required"] = route.manual_review_required
+                flow_search["routing_trace"] = route.trace
                 if search_error:
                     flow_search["resolution_search_error"] = search_error
                 if selected is not None:
@@ -8959,6 +9251,7 @@ def _build_langgraph(
                             "classification_hints": query_payload.get("classification_hints"),
                             "flow_type": query_payload.get("flow_type"),
                             "direction": query_payload.get("direction"),
+                            "io_kind": query_payload.get("io_kind"),
                             "unit": query_payload.get("unit"),
                             "compartment": query_payload.get("compartment"),
                             "query_text": query_text,

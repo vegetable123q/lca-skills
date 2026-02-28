@@ -357,7 +357,7 @@ PLACEHOLDER_QUERY_BUILDER_PROMPT = (
     "Goal:\n"
     "- Generate ONE precise query payload that preserves the exchange semantics.\n"
     "- Do not broaden the exchange scope.\n"
-    "- Keep direction, flow_type, unit, and compartment constraints consistent with the input.\n"
+    "- Keep direction, flow_type, io_kind, unit, and compartment constraints consistent with the input.\n"
     "\n"
     "Rules:\n"
     "- Use exchange_name + general_comment as primary context.\n"
@@ -365,6 +365,7 @@ PLACEHOLDER_QUERY_BUILDER_PROMPT = (
     "- classification_hints should be short canonical nouns/phrases (max 6 items).\n"
     "- flow_type must be one of: product | elementary | waste | service | null.\n"
     "- direction must be Input | Output | null.\n"
+    "- io_kind must be one of: resource | emission | raw_material | auxiliary | catalyst | energy | product | waste | service | unknown | null.\n"
     "- compartment must be air | water | soil | null.\n"
     "- If information is missing, return null instead of guessing.\n"
     "\n"
@@ -376,6 +377,7 @@ PLACEHOLDER_QUERY_BUILDER_PROMPT = (
     '  "classification_hints": ["...", "..."],\n'
     '  "flow_type": "product|elementary|waste|service" | null,\n'
     '  "direction": "Input|Output" | null,\n'
+    '  "io_kind": "resource|emission|raw_material|auxiliary|catalyst|energy|product|waste|service|unknown" | null,\n'
     '  "unit": "kg|m3|MJ|kWh|unit|..." | null,\n'
     '  "compartment": "air|water|soil" | null\n'
     "}\n"
@@ -389,7 +391,7 @@ PLACEHOLDER_UUID_SELECTOR_PROMPT = (
     "\n"
     "Rules:\n"
     "- The selected UUID MUST be from the provided candidates list.\n"
-    "- Prefer semantic consistency with exchange_name/description and constraints: flow_type, direction, unit, compartment.\n"
+    "- Prefer semantic consistency with exchange_name/description and constraints: flow_type, direction, io_kind, unit, compartment.\n"
     "- If CAS is provided in the query and candidate CAS exists, prefer exact CAS match.\n"
     "- If no candidate is clearly valid, return null.\n"
     "- Keep reason concise (1 sentence).\n"
