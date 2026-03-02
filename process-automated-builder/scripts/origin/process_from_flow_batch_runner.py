@@ -4,7 +4,7 @@
 Step-1 (P0) objective:
 - run multiple flow files concurrently (default worker=3)
 - persist scheduler state to JSON
-- auto-resume interrupted runs via `--mode langgraph --resume --run-id`
+- retry interrupted runs with workflow mode + explicit `--run-id`
 
 This script intentionally focuses on orchestration reliability first.
 """
@@ -12,6 +12,7 @@ This script intentionally focuses on orchestration reliability first.
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import json
 import os
@@ -59,6 +60,7 @@ class BatchRunner:
         self.args = args
         self.flow_dir = args.flow_dir.resolve()
         self.state_path = args.state.resolve()
+        self.manifest_path = args.manifest_path.resolve() if args.manifest_path else self.state_path.with_name("batch_manifest.csv")
         self.log_dir = args.log_dir.resolve()
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.python_bin = args.python_bin
@@ -75,6 +77,101 @@ class BatchRunner:
         self.procs: dict[str, subprocess.Popen[str]] = {}
         self._stop = False
 
+    def _has_process_exports(self, run_id: str | None) -> bool:
+        rid = str(run_id or "").strip()
+        if not rid:
+            return False
+        process_dir = SKILL_ROOT / "artifacts" / "process_from_flow" / rid / "exports" / "processes"
+        if not process_dir.exists():
+            return False
+        try:
+            for item in process_dir.iterdir():
+                if item.is_file():
+                    return True
+                if item.is_dir():
+                    for nested in item.rglob("*"):
+                        if nested.is_file():
+                            return True
+        except Exception:
+            return False
+        return False
+
+    def _task_outcome(self, task: Task) -> str:
+        if task.status == "success":
+            # Workflow mode runs with publish enabled by default; however,
+            # interrupted/resume edge cases can end with no process exports.
+            if self._has_process_exports(task.run_id):
+                return "success_published"
+            return "success_no_process_output"
+        if task.status == "failed":
+            if task.attempts >= self.max_attempts:
+                return "failed_after_max_attempts"
+            return "failed_retryable"
+        return task.status
+
+    def write_manifest(self) -> None:
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = [
+            "flow_file",
+            "flow_name",
+            "status",
+            "outcome",
+            "attempts",
+            "max_attempts",
+            "run_id",
+            "mode",
+            "operation",
+            "exit_code",
+            "last_error",
+            "started_at",
+            "finished_at",
+            "updated_at",
+            "log_path",
+        ]
+        with self.manifest_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for key in sorted(self.tasks):
+                task = self.tasks[key]
+                writer.writerow(
+                    {
+                        "flow_file": task.flow_file,
+                        "flow_name": Path(task.flow_file).name,
+                        "status": task.status,
+                        "outcome": self._task_outcome(task),
+                        "attempts": task.attempts,
+                        "max_attempts": self.max_attempts,
+                        "run_id": task.run_id or "",
+                        "mode": task.mode or "",
+                        "operation": self.operation,
+                        "exit_code": "" if task.exit_code is None else task.exit_code,
+                        "last_error": task.last_error or "",
+                        "started_at": task.started_at or "",
+                        "finished_at": task.finished_at or "",
+                        "updated_at": task.updated_at or "",
+                        "log_path": task.log_path or "",
+                    }
+                )
+
+    def _resume_state_exists(self, run_id: str | None) -> bool:
+        rid = str(run_id or "").strip()
+        if not rid:
+            return False
+        state_path = SKILL_ROOT / "artifacts" / "process_from_flow" / rid / "cache" / "process_from_flow_state.json"
+        return state_path.exists()
+
+    def discover_new_flow_files(self, *, persist: bool = True) -> int:
+        discovered = 0
+        for fp in sorted(self.flow_dir.glob("*.json")):
+            key = str(fp)
+            if key in self.tasks:
+                continue
+            self.tasks[key] = Task(flow_file=key, updated_at=now_iso())
+            discovered += 1
+        if discovered and persist:
+            self.save_state()
+        return discovered
+
     def load_or_init(self) -> None:
         if self.state_path.exists() and not self.args.reset:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -86,15 +183,7 @@ class BatchRunner:
                     task.last_error = "Recovered from interrupted scheduler session"
                     task.process_pid = None
                 self.tasks[task.flow_file] = task
-        else:
-            for fp in sorted(self.flow_dir.glob("*.json")):
-                self.tasks[str(fp)] = Task(flow_file=str(fp), updated_at=now_iso())
-
-        # discover newly added files
-        for fp in sorted(self.flow_dir.glob("*.json")):
-            key = str(fp)
-            if key not in self.tasks:
-                self.tasks[key] = Task(flow_file=key, updated_at=now_iso())
+        self.discover_new_flow_files(persist=False)
 
         self.save_state()
 
@@ -104,12 +193,14 @@ class BatchRunner:
             "workers": self.max_workers,
             "max_attempts": self.max_attempts,
             "operation": self.operation,
+            "manifest_path": str(self.manifest_path),
             "summary": self.summary(),
             "failed_reason_counts": self.failure_reason_counts(),
             "tasks": [asdict(t) for t in self.tasks.values()],
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.write_manifest()
 
     def _extract_run_id_from_log(self, log_path: Path) -> str | None:
         try:
@@ -158,34 +249,34 @@ class BatchRunner:
 
         log_path = self.log_dir / f"{flow_stem}.attempt{task.attempts}.log"
         task.log_path = str(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if task.run_id and not self._resume_state_exists(task.run_id):
+            print(
+                f"[batch] resume_state_missing run_id={task.run_id} flow={Path(task.flow_file).name}; fallback=fresh_workflow",
+                file=sys.stderr,
+            )
+            task.run_id = None
+
+        # Use workflow mode for both fresh runs and retries so publish defaults
+        # stay consistent and stage orchestration remains identical.
+        cmd = [
+            str(RUN_WRAPPER),
+            "--python-bin",
+            self.python_bin,
+            "--mode",
+            "workflow",
+            "--flow-file",
+            str(flow_path),
+            "--",
+            "--operation",
+            self.operation,
+        ]
         if task.run_id:
-            task.mode = "resume"
-            cmd = [
-                str(RUN_WRAPPER),
-                "--python-bin",
-                self.python_bin,
-                "--mode",
-                "langgraph",
-                "--",
-                "--resume",
-                "--run-id",
-                task.run_id,
-            ]
+            task.mode = "workflow_resume"
+            cmd.extend(["--run-id", task.run_id])
         else:
             task.mode = "workflow"
-            cmd = [
-                str(RUN_WRAPPER),
-                "--python-bin",
-                self.python_bin,
-                "--mode",
-                "workflow",
-                "--flow-file",
-                str(flow_path),
-                "--",
-                "--operation",
-                self.operation,
-            ]
 
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"[{now_iso()}] CMD: {' '.join(cmd)}\n")
@@ -204,6 +295,7 @@ class BatchRunner:
 
     def poll_running(self) -> None:
         done_keys: list[str] = []
+        state_changed = False
         for key, proc in list(self.procs.items()):
             rc = proc.poll()
             if rc is None:
@@ -234,6 +326,12 @@ class BatchRunner:
                 if task.log_path:
                     try:
                         log_path = Path(task.log_path)
+                        if not task.run_id:
+                            inferred_run_id = self._extract_run_id_from_log(log_path)
+                            if inferred_run_id:
+                                task.run_id = inferred_run_id
+                                task.updated_at = now_iso()
+                                state_changed = True
                         log_mtime = log_path.stat().st_mtime
                         idle_for = time.time() - log_mtime
 
@@ -300,7 +398,7 @@ class BatchRunner:
 
         for key in done_keys:
             self.procs.pop(key, None)
-        if done_keys:
+        if done_keys or state_changed:
             self.save_state()
 
     def pending_or_retry_candidates(self) -> list[str]:
@@ -377,6 +475,9 @@ class BatchRunner:
         signal.signal(signal.SIGTERM, handle_stop)
 
         while True:
+            discovered = self.discover_new_flow_files()
+            if discovered:
+                print(f"[batch] discovered_new_flows={discovered}", file=sys.stderr)
             self.poll_running()
             self.emit_heartbeat_if_due()
 
@@ -395,7 +496,8 @@ class BatchRunner:
                 # no running process; decide finish condition
                 candidates = self.pending_or_retry_candidates()
                 if not candidates:
-                    break
+                    if not self.args.watch:
+                        break
 
             time.sleep(self.args.poll_seconds)
 
@@ -411,6 +513,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--flow-dir", type=Path, required=True, help="Directory containing flow JSON files")
     p.add_argument("--state", type=Path, required=True, help="Persistent scheduler state JSON path")
+    p.add_argument(
+        "--manifest-path",
+        type=Path,
+        help="Optional CSV path for full flow status manifest (default: sibling of --state named batch_manifest.csv)",
+    )
     p.add_argument("--log-dir", type=Path, required=True, help="Directory for per-attempt logs")
     p.add_argument("--workers", type=int, default=3, help="Concurrent worker count")
     p.add_argument("--operation", choices=("produce", "treat"), default="produce")
@@ -433,6 +540,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Hard cap for one attempt total runtime (0 to disable).",
+    )
+    p.add_argument(
+        "--watch",
+        action="store_true",
+        help="Keep the scheduler process alive and keep polling for newly added flow JSON files.",
     )
     p.add_argument("--python-bin", default=os.environ.get("PAB_PYTHON_BIN", "python3"))
     p.add_argument("--reset", action="store_true", help="Ignore existing state and reinitialize tasks")
