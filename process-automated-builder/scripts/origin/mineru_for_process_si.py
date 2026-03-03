@@ -101,12 +101,17 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(output_text, encoding="utf-8")
     print(f"Saved response to {output_path}")
+    text_output_path = _default_text_output_path(output_path)
+    text_output_path.parent.mkdir(parents=True, exist_ok=True)
+    text_output_path.write_text(_format_text_payload(payload), encoding="utf-8")
+    print(f"Saved text to {text_output_path}")
 
     if not args.no_update_state and run_id:
         _update_state_with_mineru_output(
             run_id=run_id,
             input_path=args.input_path,
             output_path=output_path,
+            text_output_path=text_output_path,
         )
 
 
@@ -138,6 +143,90 @@ def _format_payload(payload: Any, *, pretty: bool) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=indent)
 
 
+def _format_text_payload(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    if isinstance(payload, str):
+        return payload
+    preferred = _extract_preferred_text(payload)
+    if preferred:
+        return preferred
+    blocks = _extract_mineru_text_blocks(payload, max_blocks=3000)
+    if blocks:
+        return "\n".join(blocks).strip()
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except TypeError:
+        return str(payload)
+
+
+def _extract_preferred_text(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace").strip()
+    if isinstance(payload, dict):
+        for key in ("return_txt", "txt", "markdown", "md"):
+            value = payload.get(key)
+            text = _extract_preferred_text(value)
+            if text:
+                return text
+        for key in ("result", "data", "pages", "content_list", "items", "blocks"):
+            value = payload.get(key)
+            text = _extract_preferred_text(value)
+            if text:
+                return text
+        return ""
+    if isinstance(payload, list):
+        for item in payload:
+            text = _extract_preferred_text(item)
+            if text:
+                return text
+    return ""
+
+
+def _extract_mineru_text_blocks(payload: Any, *, max_blocks: int) -> list[str]:
+    texts: list[str] = []
+
+    def add_text(value: Any) -> None:
+        if not value:
+            return
+        text = str(value).strip()
+        if text:
+            texts.append(text)
+
+    def handle_item(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        text = item.get("text") or item.get("content")
+        if text:
+            add_text(text)
+            return
+        blocks = item.get("blocks")
+        if isinstance(blocks, list):
+            for block in blocks:
+                if len(texts) >= max_blocks:
+                    return
+                if isinstance(block, dict):
+                    add_text(block.get("text") or block.get("content"))
+
+    if isinstance(payload, dict):
+        if "result" in payload:
+            payload = payload.get("result")
+        elif "pages" in payload:
+            payload = payload.get("pages")
+
+    if isinstance(payload, list):
+        for item in payload:
+            if len(texts) >= max_blocks:
+                break
+            handle_item(item)
+
+    return texts
+
+
 def _format_http_error(exc: httpx.HTTPError) -> str:
     if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
         response = exc.response
@@ -166,6 +255,12 @@ def _default_output_path(output_dir: Path, input_path: Path, run_id: str | None)
     return output_dir / f"{stem}.json"
 
 
+def _default_text_output_path(output_path: Path) -> Path:
+    if output_path.suffix.lower() == ".json":
+        return output_path.with_suffix(".txt")
+    return output_path.parent / f"{output_path.name}.txt"
+
+
 def _infer_doi_from_path(input_path: Path, run_id: str) -> str | None:
     si_root = PROCESS_FROM_FLOW_ARTIFACTS_ROOT / run_id / DEFAULT_SI_SUBDIR
     try:
@@ -192,7 +287,13 @@ def _load_latest_run_id() -> str | None:
     return text or None
 
 
-def _update_state_with_mineru_output(*, run_id: str, input_path: Path, output_path: Path) -> None:
+def _update_state_with_mineru_output(
+    *,
+    run_id: str,
+    input_path: Path,
+    output_path: Path,
+    text_output_path: Path,
+) -> None:
     state_path = PROCESS_FROM_FLOW_ARTIFACTS_ROOT / run_id / "cache" / "process_from_flow_state.json"
     if not state_path.exists():
         return
@@ -213,6 +314,7 @@ def _update_state_with_mineru_output(*, run_id: str, input_path: Path, output_pa
             "doi_sanitized": doi_sanitized,
             "input_path": str(input_path),
             "output_path": str(output_path),
+            "output_text_path": str(text_output_path),
             "status": "ok",
         }
     )

@@ -96,7 +96,9 @@ PROCESS_SPLIT_PROMPT = (
     "- Each process must include structured fields split by: technology/process, inputs, outputs, boundary, assumptions.\n"
     "- Each process MUST define reference_flow_name (the main output flow of the process).\n"
     "- Process name must include four modules: base_name, treatment_and_route, mix_and_location, quantitative_reference.\n"
-    "- quantitative_reference must be a numeric expression like '1 kg of <reference_flow_name>' or '1 unit of <reference_flow_name>'. If unit is unknown, use 'unit'.\n"
+    "- quantitative_reference must be a numeric expression like '1 kg of <reference_flow_name>' or '1 kWh of <reference_flow_name>'.\n"
+    "- Prefer physically meaningful units supported by evidence (kg, m2, m3, kWh, MJ, m, ...).\n"
+    "- If direct evidence is missing, use a defensible industry benchmark/expert unit and state the assumption; use 'unit' only as last resort.\n"
     "- For each process, provide a geography decision describing where the process occurs.\n"
     "- Use ILCD/TIDAS location codes (see input_data/location). Choose the most specific code supported by evidence.\n"
     "- If the process is located in China but some inputs use non-China datasets, keep location_code=CN and explain the substitution in description_of_restrictions.\n"
@@ -147,6 +149,33 @@ PROCESS_SPLIT_PROMPT = (
     "}\n"
 )
 
+REFERENCE_OUTPUT_UNIT_PROMPT = (
+    "You are choosing reference-output units for unit processes in an LCA foreground chain.\n"
+    "Use process context and available references to decide a defensible quantitative reference unit for each process.\n"
+    "\n"
+    "Rules:\n"
+    "- Prefer physically meaningful units supported by evidence (kg, kWh, MJ, m3, m2, m, ...).\n"
+    "- If direct evidence is unavailable, choose a defensible industry benchmark or expert rule and mark assumptions.\n"
+    "- Use 'unit' only when no defensible physical unit can be justified.\n"
+    "- Product/waste reference outputs MUST NOT use LCIA impact units (e.g., CTUe, DALY, kg CO2 eq).\n"
+    "- Return one decision per process_id.\n"
+    "\n"
+    "Return strict JSON:\n"
+    "{\n"
+    '  "processes": [\n'
+    "    {\n"
+    '      "process_id": "P1",\n'
+    '      "unit": "kg|kWh|MJ|m3|m2|m|unit|...",\n'
+    '      "source_tier": "literature|industry_benchmark|expert_judgement",\n'
+    '      "confidence": 0.0,\n'
+    '      "reason": "short reason",\n'
+    '      "assumptions": "optional assumptions",\n'
+    '      "evidence": ["optional citation or rationale"]\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+)
+
 EXCHANGES_PROMPT = (
     "You are defining the inventory exchanges (inputs/outputs) for each process.\n"
     "Input context includes the reference flow summary, a technical description, and a list of processes.\n"
@@ -166,14 +195,18 @@ EXCHANGES_PROMPT = (
     "- For emissions, split into elementary flows (e.g., methane, nitrous oxide, ammonia, CO2, NOx, particulates) "
     "or waterborne pollutants (e.g., nitrate, phosphate, pesticides) when relevant.\n"
     "- For labor, split by activity if multiple (e.g., 'Labor, harvesting' and 'Labor, post-harvest handling').\n"
-    "- Add flow_type for each exchange: product | elementary | waste | service.\n"
-    "- In generalComment, append machine-readable tags using EXACT keys: [tg_io_kind_tag=<flow_type>] [tg_io_uom_tag=<unit>].\n"
+    "- Add flow_type for each exchange (for flow search/matching constraints): product | elementary | waste | service.\n"
+    "- Add material_role for review semantics: raw_material | auxiliary | catalyst | energy | emission | product | waste | service | unknown.\n"
+    "- In generalComment, append machine-readable tags using EXACT keys: [tg_io_kind_tag=<review_kind>] [tg_io_uom_tag=<unit>].\n"
+    "- review_kind is for review grouping (not the same concept as flow_type); prefer material_role semantics and use resource/emission for elementary inputs/outputs when applicable.\n"
     "- Do NOT use ambiguous tag keys such as classification/category/typeOfDataSet.\n"
-    "- Add material_role for each exchange: raw_material | auxiliary | catalyst | energy | emission | product | waste | service | unknown.\n"
     "- Use auxiliary/catalyst for inputs that are not embodied in the main product; set balance_exclude=true for those.\n"
     "- Provide role_reason to justify the material_role choice when it is not obvious.\n"
     "- For emissions, include 'to air' / 'to water' / 'to soil' in exchangeName when applicable.\n"
-    "- Provide unit for each exchange (e.g., kg, kWh, MJ, m3, unit). If unsure, use 'unit'.\n"
+    "- Provide unit for each exchange (e.g., kg, kWh, MJ, m3, m2, unit).\n"
+    "- For the reference flow exchange of each process, prioritize the same physical unit as quantitative_reference when available.\n"
+    "- Product/waste exchanges MUST NOT use LCIA impact units (e.g., CTUe, CTUh, DALY, kg CO2 eq).\n"
+    "- Use 'unit' only when no defensible physical unit is available.\n"
     "- Provide amount as a numeric string; use null when unknown (placeholders are filled later).\n"
     "- For every exchange, provide data_source and evidence: data_source.source_type must be literature|si|expert_judgement.\n"
     "- data_source.citations must include DOI or URL when available (e.g., 'DOI 10.xxx' or 'https://doi.org/...').\n"
@@ -205,6 +238,37 @@ EXCHANGES_PROMPT = (
     '          "evidence": ["..."]\n'
     "        }\n"
     "      ]\n"
+    "    }\n"
+    "  ]\n"
+    "}\n"
+)
+
+EXCHANGE_IO_KIND_TAG_BATCH_PROMPT = (
+    "You are classifying review `io_kind_tag` for a batch of exchanges belonging to ONE unit process.\n"
+    "\n"
+    "Goal:\n"
+    "- Classify every exchange's io_kind_tag using review semantics.\n"
+    "- Judge all exchanges together (inputs + outputs) to keep process-level consistency.\n"
+    "\n"
+    "Rules:\n"
+    "- Use the whole exchange list jointly; do NOT classify each row in isolation.\n"
+    "- Allowed io_kind_tag values: raw_material | auxiliary | catalyst | energy | resource | emission | product | waste | service | unknown.\n"
+    "- `is_reference_flow=true` must be classified as product.\n"
+    "- Elementary inputs from environment (e.g., water, land, minerals, natural gas as resource extraction context) use resource.\n"
+    "- Elementary outputs to environment use emission.\n"
+    "- Discarded residues/sludge/solid waste outputs are usually waste.\n"
+    "- Labor/transport/operation services are service.\n"
+    "- Purchased utilities/fuels used as technosphere inputs can be energy.\n"
+    "- Materials/intermediates consumed by the process are raw_material or auxiliary/catalyst depending on process function.\n"
+    "- Return one result for every provided exchange id.\n"
+    "\n"
+    "Return strict JSON:\n"
+    "{\n"
+    '  "exchanges": [\n'
+    "    {\n"
+    '      "id": "E1",\n'
+    '      "io_kind_tag": "raw_material|auxiliary|catalyst|energy|resource|emission|product|waste|service|unknown",\n'
+    '      "reason": "short reason"\n'
     "    }\n"
     "  ]\n"
     "}\n"
@@ -325,7 +389,7 @@ PLACEHOLDER_QUERY_BUILDER_PROMPT = (
     "Goal:\n"
     "- Generate ONE precise query payload that preserves the exchange semantics.\n"
     "- Do not broaden the exchange scope.\n"
-    "- Keep direction, flow_type, unit, and compartment constraints consistent with the input.\n"
+    "- Keep direction, flow_type, io_kind, unit, and compartment constraints consistent with the input.\n"
     "\n"
     "Rules:\n"
     "- Use exchange_name + general_comment as primary context.\n"
@@ -333,6 +397,7 @@ PLACEHOLDER_QUERY_BUILDER_PROMPT = (
     "- classification_hints should be short canonical nouns/phrases (max 6 items).\n"
     "- flow_type must be one of: product | elementary | waste | service | null.\n"
     "- direction must be Input | Output | null.\n"
+    "- io_kind must be one of: resource | emission | raw_material | auxiliary | catalyst | energy | product | waste | service | unknown | null.\n"
     "- compartment must be air | water | soil | null.\n"
     "- If information is missing, return null instead of guessing.\n"
     "\n"
@@ -344,6 +409,7 @@ PLACEHOLDER_QUERY_BUILDER_PROMPT = (
     '  "classification_hints": ["...", "..."],\n'
     '  "flow_type": "product|elementary|waste|service" | null,\n'
     '  "direction": "Input|Output" | null,\n'
+    '  "io_kind": "resource|emission|raw_material|auxiliary|catalyst|energy|product|waste|service|unknown" | null,\n'
     '  "unit": "kg|m3|MJ|kWh|unit|..." | null,\n'
     '  "compartment": "air|water|soil" | null\n'
     "}\n"
@@ -357,7 +423,7 @@ PLACEHOLDER_UUID_SELECTOR_PROMPT = (
     "\n"
     "Rules:\n"
     "- The selected UUID MUST be from the provided candidates list.\n"
-    "- Prefer semantic consistency with exchange_name/description and constraints: flow_type, direction, unit, compartment.\n"
+    "- Prefer semantic consistency with exchange_name/description and constraints: flow_type, direction, io_kind, unit, compartment.\n"
     "- If CAS is provided in the query and candidate CAS exists, prefer exact CAS match.\n"
     "- If no candidate is clearly valid, return null.\n"
     "- Keep reason concise (1 sentence).\n"

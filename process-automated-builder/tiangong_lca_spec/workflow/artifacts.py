@@ -23,6 +23,7 @@ from tiangong_lca_spec.flow_alignment.selector import LanguageModelProtocol
 from tiangong_lca_spec.process_extraction.merge import merge_results
 from tiangong_lca_spec.process_extraction.tidas_mapping import ILCD_ENTRY_LEVEL_REFERENCE_ID
 from tiangong_lca_spec.process_extraction.validators import is_placeholder_value
+from tiangong_lca_spec.publishing import FlowPublisher
 from tiangong_lca_spec.product_flow_creation import ProductFlowCreateRequest, ProductFlowCreationService
 from tiangong_lca_spec.tidas_validation import TidasValidationService
 
@@ -225,24 +226,45 @@ def generate_artifacts(
         source_references |= _collect_source_references(ilcd_dataset)
 
     unmatched_entries = _collect_unmatched_exchanges(alignment_entries)
-    flow_count = 0
+    placeholder_alignment: list[dict[str, Any]] = []
     for process_name, exchange in unmatched_entries:
-        flow_dataset = _build_flow_dataset(
-            exchange,
-            process_name,
-            timestamp,
-            format_source_uuid,
-            comment_llm,
+        placeholder_alignment.append(
+            {
+                "process_name": process_name,
+                "origin_exchanges": {"placeholders": [deepcopy(exchange)]},
+            }
         )
-        if not flow_dataset:
-            continue
-        uuid_value, dataset = flow_dataset
-        flow_ilcd = dataset.get("flowDataSet", {})
-        dataset_version = resolve_dataset_version(flow_ilcd)
-        flow_filename = build_export_filename(uuid_value, dataset_version)
-        flow_path = artifact_root / "flows" / flow_filename
-        _dump_json(dataset, flow_path)
-        flow_count += 1
+
+    flow_count = 0
+    if placeholder_alignment:
+        flow_publisher = FlowPublisher(
+            dry_run=True,
+            llm=comment_llm,
+        )
+        try:
+            flow_plans = flow_publisher.prepare_from_alignment(placeholder_alignment)
+            held_flows = flow_publisher.held_flows
+            if held_flows:
+                LOGGER.warning(
+                    "artifact_builder.placeholder_flows_held",
+                    held_count=len(held_flows),
+                    preview=held_flows[:5],
+                )
+            for plan in flow_plans:
+                if getattr(plan, "mode", "insert") != "insert":
+                    continue
+                uuid_value = str(getattr(plan, "uuid", "") or "").strip()
+                dataset = {"flowDataSet": deepcopy(dict(getattr(plan, "dataset", {}) or {}))}
+                if not uuid_value or not isinstance(dataset.get("flowDataSet"), dict):
+                    continue
+                flow_ilcd = dataset.get("flowDataSet", {})
+                dataset_version = resolve_dataset_version(flow_ilcd)
+                flow_filename = build_export_filename(uuid_value, dataset_version)
+                flow_path = artifact_root / "flows" / flow_filename
+                _dump_json(dataset, flow_path)
+                flow_count += 1
+        finally:
+            flow_publisher.close()
 
     written_sources = 0
     format_uuid_lower = (format_source_uuid or "").strip().lower()

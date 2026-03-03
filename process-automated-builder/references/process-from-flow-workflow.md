@@ -30,7 +30,7 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 - `10` Step 5a `intended_applications`: Write intended applications per process before dataset build.
 - `11` Step 5 `build_process_datasets`: Emit final ILCD process datasets.
 - `12` Step 6 `resolve_placeholders`: Post-process unmatched exchanges with a second search pass.
-- `13` Step 7 `balance_review`: Mass/energy balance check (reports only).
+- `13` Step 7 `balance_review`: Mass/energy balance check. Default behavior runs auto-revision and then recomputes balance (`--no-auto-balance-revise` disables).
 - `14` Step 8 `data_cutoff_and_completeness`: Summarize missing values/conversions, write data cut-off principles (LLM first, rule fallback), and rewrite process-level `dataTreatment` from final balance review.
 
 ## LangGraph Core Workflow (ProcessFromFlowService)
@@ -62,7 +62,7 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 - Use `EXCHANGES_PROMPT` to generate exchanges; `is_reference_flow` aligns with `reference_flow_name` (Output for production, Input for treatment).
 - Exchange names must be searchable and not composite; fill unit/amount (placeholders if unknown).
 - Emissions add media suffix (`to air`, `to water`, `to soil`), plus `flow_type` and `search_hints`.
-- Append machine-readable tags to each exchange `generalComment`: `[tg_io_kind_tag=<flow_type>] [tg_io_uom_tag=<unit>]`.
+- Append machine-readable tags to each exchange `generalComment`: `[tg_io_kind_tag=<review_kind>] [tg_io_uom_tag=<unit>]`.
 - Do not use ambiguous tag keys such as `classification`, `category`, or `typeOfDataSet`.
 - Assign `material_role` for each exchange (`raw_material|auxiliary|catalyst|energy|emission|product|waste|service|unknown`); `balance_exclude` is optional explicit metadata, while `balance_review` still excludes auxiliary/catalyst by role even when the flag is absent.
 - Every exchange records `data_source` and `evidence`; inferred items must mark `source_type=expert_judgement`.
@@ -76,6 +76,8 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 4) match_flows
 - Search flows for each exchange (top 10 candidates); use LLM selector when available, fallback to `SimilarityCandidateSelector` when no LLM.
 - Record `flow_search.query/candidates/selected_uuid/selected_reason/selector/unmatched` and fill `uuid/shortDescription`.
+- Apply staged routing filters before selection: `flow_type` first, then for elementary flows enforce `Input->resource / Output->emission`, and for emissions prefer `air/water/soil` compartment hints.
+- If strict filtering yields no candidate, relax in order: compartment -> elementary kind -> cross-type fallback (cross-type fallback marks `manual_review_required`).
 - Only add matching info; do not overwrite `data_source` and `evidence`.
 
 4b) align_exchange_units
@@ -107,14 +109,15 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 6) resolve_placeholders (post-processing)
 - After `build_process_datasets`, scan exchanges with `referenceToFlowDataSet.unmatched:placeholder=true`.
 - Rebuild a secondary `flow_search` query from `exchangeName/Direction/unit/flow_type/search_hints/generalComment`.
-- Filter candidates by `flow_type`; for elementary flows also filter by medium (`air/water/soil`).
+- Filter candidates with the same staged routing policy as Step 4 (`flow_type`, elementary kind, then emission compartment with progressive relaxation).
 - Use selector (LLM/Rule) to choose; write `flow_search.secondary_query/resolution_*` and update process datasets.
 - If still unmatched, keep placeholder and record `resolution_status/reason` for review.
 
 7) balance_review (post-processing)
 - Compute mass/energy balance from `matched_process_exchanges` (fallback `process_exchanges`), prefer flow unit groups, fallback to built-in unit mapping.
 - Exclude `material_role=auxiliary|catalyst` or `balance_exclude=true` from balance stats.
-- Output `balance_review` and `balance_review_summary`, mark `ok|check|insufficient`, and log warnings; no exchange values are rewritten.
+- Output `balance_review` and `balance_review_summary`, mark `ok|check|insufficient`, and log warnings.
+- Default CLI enables auto-revision after the first review (`--auto-balance-revise`) to adjust severe core-mass imbalances on non-reference exchanges and then rerun Step 7; disable with `--no-auto-balance-revise`.
 - Record `unit_mismatches` and `density_estimates` for review.
 
 8) dataCutOffAndCompletenessPrinciples
@@ -133,7 +136,7 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 - `process_from_flow_langgraph.py`: LangGraph CLI (run/resume/cleanup/publish), supports `--stop-after` and `--publish/--commit`.
 - `process_from_flow_reference_usability.py`: Step 1b usability screening (LCIA vs LCI).
 - `process_from_flow_download_si.py`: Download SI originals and write SI metadata (supports `--doi/--cluster/--recommendation` filters, `--dry-run`, `--no-update-state`).
-- `mineru_for_process_si.py`: Parse PDF/image SI into JSON structure.
+- `mineru_for_process_si.py`: Parse PDF/image SI into JSON structure and save extracted text alongside JSON.
 - `process_from_flow_reference_usage_tagging.py`: Tag reference usage (also writes tags to `step_1c_reference_clusters.reference_summaries`).
 
 ### Maintenance Utilities (Non-main-chain, Offline Backfill/Recompute)
@@ -206,47 +209,76 @@ This reference is a self-contained migration of the `process_from_flow` workflow
 - Flow select cache: `cache/flow_select_cache.json` (first remote CRUD select per flow UUID/version, then local cache hits within and across resumed runs using the same run cache).
 - `exports/flows` is generated from final process references (`referenceToFlowDataSet`) after datasets are built/published; it is not a dump of all search candidates.
 - Placeholder report: `cache/placeholder_report.json` (from `resolve_placeholders` or `process_from_flow_placeholder_report.py`).
+- Flow auto-build manifest: `cache/flow_auto_build_manifest.jsonl` (`origin=selected|generated`, target uuid/version, publish flag).
+- Process update report: `cache/process_update_report.json` (rewritten count + remaining placeholder refs).
+- Flow publish results: `cache/flow_publish_results.jsonl` (inserted/conflict/error/skipped per generated flow).
+- Flow publish failures: `cache/flow_publish_failures.jsonl` (retry list with `error_type` + `retryable`).
+- Publish summary: `cache/publish_summary.json` (flow/process/source counts and acceptance counters).
+- Method-policy auto-repair report: `cache/method_policy_autofix_report.json` (deterministic fixes, auto-rebuild attempt, unresolved `manual_required` items).
 - Resume: `uv run python scripts/origin/process_from_flow_langgraph.py --resume --run-id <run_id>`.
 - Maintenance backfill sources: `uv run python scripts/origin/process_from_flow_build_sources.py --run-id <run_id>`.
 - Maintenance placeholder report: `uv run python scripts/origin/process_from_flow_placeholder_report.py --run-id <run_id>` (`--no-update-state` avoids writing to state).
-- Publish existing run: `uv run python scripts/origin/process_from_flow_langgraph.py --publish-only --run-id <run_id> [--publish-flows] [--commit]`.
+- Publish existing run: `uv run python scripts/origin/process_from_flow_langgraph.py --publish-only --run-id <run_id> [--commit]`.
+- Flow auto-build only: `uv run python scripts/origin/process_from_flow_langgraph.py flow-auto-build --run-id <run_id>`.
+- Process update only: `uv run python scripts/origin/process_from_flow_langgraph.py process-update --run-id <run_id>`.
 - Cleanup old runs: `uv run python scripts/origin/process_from_flow_langgraph.py --cleanup-only --retain-runs 3`.
 
-## Publishing Flow (Flow/Source/Process)
+## Publishing Flow (Flow/Process/Source)
 Actual order in `process_from_flow_langgraph.py`:
-- With `--publish-flows`: `flows -> sources -> processes`.
-- Without `--publish-flows`: `sources -> processes`.
+- `flow-auto-build` (generate flow plans and flow exports, including placeholder completion).
+- `process-update` (rewrite process placeholder references to target flow refs).
+- Publish generated flows only (`origin=generated` in manifest; failures are recorded and do not stop the pipeline).
+- Publish processes.
+- Publish sources.
 
 ### Dependencies and Configuration
 - Entrypoints: `FlowPublisher`, `ProcessPublisher`, `DatabaseCrudClient`.
 - MCP service: configure `tiangong_lca_remote` via `TIANGONG_LCA_REMOTE_*` env vars (`Database_CRUD_Tool`).
 - LLM optional: used for flow type/product category inference and bilingual field completion for new flows; failures fall back to deterministic defaults with logs.
 
-### Step 0: Publish sources (optional but recommended)
-- `--publish/--publish-only` publishes sources before processes.
-- Only publish sources referenced by process/exchange `referenceToDataSource`.
-
 ### Step 1: Prepare alignment structure (for FlowPublisher)
 - Structure: `[{ "process_name": "...", "origin_exchanges": { "<exchangeName>": [<exchange dict>, ...] } }]`.
 - Each exchange dict must include: `exchangeName`, `exchangeDirection`, `unit`, `meanAmount|resultingAmount|amount`, `generalComment`, `referenceToFlowDataSet`.
 - Optionally add `matchingDetail.selectedCandidate` mapped from `flow_search` for better classification/property selection.
 
-### Step 2: Publish/update flows
+### Step 2: Build flow plans and update process refs
 - `FlowPublisher` builds flow datasets via shared `ProductFlowCreationService`, then validates through `tidas_sdk.create_flow` (validation fallback is allowed and logged).
 - `FlowPublisher.prepare_from_alignment()` builds `FlowPublishPlan`:
   - Placeholder `referenceToFlowDataSet` -> insert.
-  - Matched but missing flow property -> update (version +1).
   - Elementary flows are not created; product/waste flows generate ILCD flow datasets.
-- `FlowPublisher.publish()` applies `FlowDedupService` at publish time and can switch final action among `insert/update/reuse` based on remote existence checks, so final action may differ from plan mode.
+- `process-update` uses plan `exchange_ref` mappings to rewrite placeholder refs in process datasets before publish.
 - Auto inference:
   - `FlowTypeClassifier`: LLM first, fallback rules.
   - `FlowProductCategorySelector`: Pick product category level by level.
   - `FlowPropertyRegistry`: Defaults to Mass (override per exchange if needed).
-- After publish, use `FlowPublishPlan.exchange_ref` to replace placeholders in process datasets.
+- If unresolved placeholders remain after process-update, `process_update_incomplete=true` is reported and publish continues.
 
 ### Step 3: Publish processes
 - `ProcessPublisher.publish(process_datasets)` defaults to dry-run; `--commit` writes.
 - Always `close()` MCP clients after publishing.
+
+### Step 4: Publish sources
+- Publish only sources referenced by process/exchange `referenceToDataSource`.
+- Source publish runs after process publish in the default sequence.
+
+### Publish Artifacts and Acceptance Counters
+- `cache/flow_auto_build_manifest.jsonl`:
+  - `origin=selected|generated`
+  - `target_uuid`, `target_version`
+  - `needs_publish`
+- `cache/flow_publish_results.jsonl`:
+  - one row per generated publish candidate with status `inserted|conflict|error|skipped`
+- `cache/flow_publish_failures.jsonl`:
+  - `flow_uuid`, `intended_version`, `reason`, `error_type`, `retryable`
+- `cache/process_update_report.json`:
+  - rewritten reference count and `remaining_placeholder_refs`
+- `cache/publish_summary.json` counters:
+  - `generated_flows_total`
+  - `flow_insert_success`
+  - `flow_insert_failed`
+  - `process_published`
+  - `source_published`
+  - `remaining_placeholder_refs`
 
 ## Literature Service Configuration and Operation
 ### Retrieval Strategy

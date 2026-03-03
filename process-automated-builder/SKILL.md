@@ -45,6 +45,9 @@ export OPENAI_MODEL="gpt-5"
 scripts/run-process-automated-builder.sh --mode workflow --flow-file /abs/path/reference-flow.json -- --operation produce
 scripts/run-process-automated-builder.sh --mode langgraph --flow-file /abs/path/reference-flow.json -- --stop-after matches --operation produce
 scripts/run-process-automated-builder.sh --mode langgraph -- --resume --run-id <run_id>
+scripts/run-process-automated-builder.sh --mode langgraph -- --publish-only --run-id <run_id> --commit
+scripts/run-process-automated-builder.sh --mode langgraph -- flow-auto-build --run-id <run_id>
+scripts/run-process-automated-builder.sh --mode langgraph -- process-update --run-id <run_id>
 ```
 
 ## Bundled Python Scripts
@@ -60,7 +63,7 @@ scripts/run-process-automated-builder.sh --mode langgraph -- --resume --run-id <
 - Configure flow-search MCP from env: `TIANGONG_LCA_REMOTE_TRANSPORT`, `TIANGONG_LCA_REMOTE_SERVICE_NAME`, `TIANGONG_LCA_REMOTE_URL`, `TIANGONG_LCA_REMOTE_API_KEY`.
 - Configure OpenAI from env when LLM is enabled: `OPENAI_API_KEY`, optional `OPENAI_MODEL`, optional `OPENAI_BASE_URL`.
 - Configure KB MCP from env when literature retrieval is needed: `TIANGONG_KB_REMOTE_TRANSPORT`, `TIANGONG_KB_REMOTE_SERVICE_NAME`, `TIANGONG_KB_REMOTE_URL`, `TIANGONG_KB_REMOTE_API_KEY`.
-- Configure MinerU from env when SI OCR parsing is needed: `TIANGONG_MINERU_WITH_IMAGE_URL`, optional `TIANGONG_MINERU_WITH_IMAGE_API_KEY`, optional provider/model/timeout flags.
+- Configure MinerU from env when SI OCR parsing is needed: `TIANGONG_MINERU_WITH_IMAGE_URL`, optional `TIANGONG_MINERU_WITH_IMAGE_API_KEY`, optional provider/model/timeout flags, optional `TIANGONG_MINERU_WITH_IMAGE_RETURN_TXT` (default `true`).
 
 ## Fast Troubleshooting
 - Missing `process_datasets` or `source_datasets`: verify `stop_after` did not stop before dataset stages.

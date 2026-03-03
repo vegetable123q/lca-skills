@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,14 +41,45 @@ except ModuleNotFoundError:  # pragma: no cover
         build_process_from_flow_run_id,
     )
 
+try:
+    from scripts.origin.process_from_flow_cost_report import (  # type: ignore
+        DEFAULT_INPUT_PRICE_PER_1M,
+        DEFAULT_OUTPUT_PRICE_PER_1M,
+    )
+except ModuleNotFoundError:  # pragma: no cover
+    from process_from_flow_cost_report import (  # type: ignore
+        DEFAULT_INPUT_PRICE_PER_1M,
+        DEFAULT_OUTPUT_PRICE_PER_1M,
+    )
+
 from tiangong_lca_spec.state_lock import hold_state_file_lock
 
-PROCESS_FROM_FLOW_ARTIFACTS_ROOT = Path("artifacts/process_from_flow")
+# Keep workflow artifacts rooted at repository level so wrapper cwd does not split
+# logs/state across different artifacts directories.
+PROCESS_FROM_FLOW_ARTIFACTS_ROOT = REPO_ROOT / "artifacts" / "process_from_flow"
 DEFAULT_SI_SUBDIR = Path("input/si")
 MINERU_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".tsv", ".xlsx", ".docx"}
 WORKFLOW_LOG_SUBDIR = Path("cache/workflow_logs")
 WORKFLOW_TIMING_REPORT = Path("cache/workflow_timing_report.json")
+WORKFLOW_TIMING_HEARTBEAT_SECONDS = 5.0
+DEFAULT_COST_INPUT_PRICE_PER_1M = float(DEFAULT_INPUT_PRICE_PER_1M)
+DEFAULT_COST_OUTPUT_PRICE_PER_1M = float(DEFAULT_OUTPUT_PRICE_PER_1M)
+ENV_COST_INPUT_PRICE_PER_1M = "TIANGONG_PFF_COST_INPUT_PRICE_PER_1M"
+ENV_COST_OUTPUT_PRICE_PER_1M = "TIANGONG_PFF_COST_OUTPUT_PRICE_PER_1M"
+
+
+def _read_cost_price_from_env(env_name: str, default_value: float) -> float:
+    raw = (os.getenv(env_name) or "").strip()
+    if not raw:
+        return default_value
+    try:
+        value = float(raw)
+    except ValueError:
+        return default_value
+    if value < 0:
+        return default_value
+    return value
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,20 +90,96 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-translate-zh", action="store_true", help="Skip adding Chinese translations.")
     parser.add_argument(
         "--allow-density-conversion",
+        dest="allow_density_conversion",
         action="store_true",
-        help="Allow LLM-based density conversion for mass/volume mismatches.",
+        help="Enable LLM-based density conversion for mass/volume mismatches (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-allow-density-conversion",
+        dest="allow_density_conversion",
+        action="store_false",
+        help="Disable LLM-based density conversion for mass/volume mismatches.",
     )
     parser.add_argument(
         "--auto-balance-revise",
+        dest="auto_balance_revise",
         action="store_true",
-        help=("After the first balance review, auto-revise severe core-mass imbalances " "on non-reference exchanges, then recompute balance review."),
+        help=("Enable auto-revision after the first balance review: revise severe core-mass " "imbalances on non-reference exchanges, then recompute balance review (default: enabled)."),
+    )
+    parser.add_argument(
+        "--no-auto-balance-revise",
+        dest="auto_balance_revise",
+        action="store_false",
+        help="Disable auto-revision after balance review.",
     )
     parser.add_argument("--min-si-hint", default="possible", help="Min si_hint to download (none|possible|likely).")
     parser.add_argument("--si-max-links", type=int, help="Max SI links per DOI.")
     parser.add_argument("--si-timeout", type=float, help="HTTP timeout for SI download.")
-    parser.add_argument("--publish", action="store_true", help="Publish generated process datasets after completion.")
-    parser.add_argument("--publish-flows", action="store_true", help="Also publish placeholder flow datasets.")
-    parser.add_argument("--commit", action="store_true", help="Actually invoke Database_CRUD_Tool (default: dry-run).")
+    parser.add_argument(
+        "--publish",
+        dest="publish",
+        action="store_true",
+        help="Publish generated flow/process/source datasets after completion (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-publish",
+        dest="publish",
+        action="store_false",
+        help="Disable publishing and keep outputs local under exports/.",
+    )
+    parser.add_argument(
+        "--commit",
+        dest="commit",
+        action="store_true",
+        help="Commit publish actions to remote CRUD service (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-commit",
+        dest="commit",
+        action="store_false",
+        help="Publish in dry-run mode without remote commit.",
+    )
+    parser.add_argument(
+        "--skip-flow-auto-build",
+        action="store_true",
+        help="Skip flow-auto-build during publish (debug only).",
+    )
+    parser.add_argument(
+        "--skip-process-update",
+        action="store_true",
+        help="Skip process-update during publish (debug only).",
+    )
+    parser.add_argument(
+        "--cost-report",
+        dest="cost_report",
+        action="store_true",
+        help="Generate cache/llm_cost_report.json after run/publish (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-cost-report",
+        dest="cost_report",
+        action="store_false",
+        help="Disable automatic LLM cost report generation.",
+    )
+    parser.add_argument(
+        "--cost-input-price-per-1m",
+        type=float,
+        default=_read_cost_price_from_env(ENV_COST_INPUT_PRICE_PER_1M, DEFAULT_COST_INPUT_PRICE_PER_1M),
+        help=f"USD per 1M input tokens for cost report (default: {DEFAULT_COST_INPUT_PRICE_PER_1M}).",
+    )
+    parser.add_argument(
+        "--cost-output-price-per-1m",
+        type=float,
+        default=_read_cost_price_from_env(ENV_COST_OUTPUT_PRICE_PER_1M, DEFAULT_COST_OUTPUT_PRICE_PER_1M),
+        help=f"USD per 1M output tokens for cost report (default: {DEFAULT_COST_OUTPUT_PRICE_PER_1M}).",
+    )
+    parser.set_defaults(
+        publish=True,
+        commit=True,
+        auto_balance_revise=True,
+        allow_density_conversion=True,
+        cost_report=True,
+    )
     parser.add_argument(
         "--stop-after",
         choices=("references", "tech", "processes", "exchanges", "matches", "sources", "datasets"),
@@ -130,8 +239,24 @@ def _run_reference_stage(args: argparse.Namespace, run_id: str, *, log_path: Pat
         cmd.append("--no-translate-zh")
     if args.allow_density_conversion:
         cmd.append("--allow-density-conversion")
+    else:
+        cmd.append("--no-allow-density-conversion")
     if args.auto_balance_revise:
         cmd.append("--auto-balance-revise")
+    else:
+        cmd.append("--no-auto-balance-revise")
+    if args.cost_report:
+        cmd.append("--cost-report")
+    else:
+        cmd.append("--no-cost-report")
+    cmd.extend(
+        [
+            "--cost-input-price-per-1m",
+            str(args.cost_input_price_per_1m),
+            "--cost-output-price-per-1m",
+            str(args.cost_output_price_per_1m),
+        ]
+    )
     _run_python(script, cmd, log_path=log_path)
 
 
@@ -218,16 +343,34 @@ def _run_main_pipeline(args: argparse.Namespace, run_id: str, *, log_path: Path 
         cmd.append("--no-translate-zh")
     if args.allow_density_conversion:
         cmd.append("--allow-density-conversion")
+    else:
+        cmd.append("--no-allow-density-conversion")
     if args.auto_balance_revise:
         cmd.append("--auto-balance-revise")
+    else:
+        cmd.append("--no-auto-balance-revise")
     if args.stop_after:
         cmd.extend(["--stop-after", args.stop_after])
     if args.publish:
         cmd.append("--publish")
-    if args.publish_flows:
-        cmd.append("--publish-flows")
+        if args.skip_flow_auto_build:
+            cmd.append("--skip-flow-auto-build")
+        if args.skip_process_update:
+            cmd.append("--skip-process-update")
     if args.commit:
         cmd.append("--commit")
+    if args.cost_report:
+        cmd.append("--cost-report")
+    else:
+        cmd.append("--no-cost-report")
+    cmd.extend(
+        [
+            "--cost-input-price-per-1m",
+            str(args.cost_input_price_per_1m),
+            "--cost-output-price-per-1m",
+            str(args.cost_output_price_per_1m),
+        ]
+    )
     _run_python(script, cmd, log_path=log_path)
 
 
@@ -267,6 +410,42 @@ def _write_timing_report(
     report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _start_timing_heartbeat(
+    *,
+    report_lock: threading.Lock,
+    report_path: Path,
+    run_id: str,
+    flow_path: Path,
+    operation: str,
+    workflow_started_at: datetime,
+    stage_records: list[dict[str, object]],
+    stage_record: dict[str, object],
+    stage_started_perf: float,
+    interval_seconds: float = WORKFLOW_TIMING_HEARTBEAT_SECONDS,
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def _heartbeat_loop() -> None:
+        while not stop_event.wait(interval_seconds):
+            with report_lock:
+                if stage_record.get("status") != "running":
+                    return
+                stage_record["elapsed_seconds"] = round(time.perf_counter() - stage_started_perf, 3)
+                stage_record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _write_timing_report(
+                    report_path=report_path,
+                    run_id=run_id,
+                    flow_path=flow_path,
+                    operation=operation,
+                    started_at=workflow_started_at,
+                    stages=stage_records,
+                )
+
+    thread = threading.Thread(target=_heartbeat_loop, name="workflow-timing-heartbeat", daemon=True)
+    thread.start()
+    return stop_event, thread
+
+
 def main() -> None:
     args = parse_args()
     if not args.flow.exists():
@@ -292,8 +471,20 @@ def main() -> None:
     ]
 
     stage_records: list[dict[str, object]] = []
+    timing_report_lock = threading.Lock()
     total_start = time.perf_counter()
     total_stages = len(stage_plan)
+
+    def _write_timing_snapshot() -> None:
+        with timing_report_lock:
+            _write_timing_report(
+                report_path=timing_report_path,
+                run_id=run_id,
+                flow_path=args.flow,
+                operation=args.operation,
+                started_at=started_at,
+                stages=stage_records,
+            )
 
     for index, (stage_name, runner) in enumerate(stage_plan, start=1):
         stage_log_path = workflow_log_dir / f"{stage_name}.log"
@@ -316,53 +507,54 @@ def main() -> None:
 
         stage_started_at = datetime.now(timezone.utc)
         stage_start = time.perf_counter()
+        record = {
+            "index": index,
+            "name": stage_name,
+            "status": "running",
+            "started_at": stage_started_at.isoformat(),
+            "updated_at": stage_started_at.isoformat(),
+            "elapsed_seconds": 0.0,
+            "log_path": str(stage_log_path),
+        }
+        stage_records.append(record)
+        _write_timing_snapshot()
+        heartbeat_stop, heartbeat_thread = _start_timing_heartbeat(
+            report_lock=timing_report_lock,
+            report_path=timing_report_path,
+            run_id=run_id,
+            flow_path=args.flow,
+            operation=args.operation,
+            workflow_started_at=started_at,
+            stage_records=stage_records,
+            stage_record=record,
+            stage_started_perf=stage_start,
+        )
         try:
             runner(stage_log_path)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
+            heartbeat_stop.set()
+            heartbeat_thread.join()
             stage_elapsed = time.perf_counter() - stage_start
-            record = {
-                "index": index,
-                "name": stage_name,
-                "status": "failed",
-                "started_at": stage_started_at.isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "elapsed_seconds": round(stage_elapsed, 3),
-                "log_path": str(stage_log_path),
-                "error": str(exc),
-            }
-            stage_records.append(record)
-            _write_timing_report(
-                report_path=timing_report_path,
-                run_id=run_id,
-                flow_path=args.flow,
-                operation=args.operation,
-                started_at=started_at,
-                stages=stage_records,
-            )
+            record["status"] = "failed"
+            record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            record["updated_at"] = record["finished_at"]
+            record["elapsed_seconds"] = round(stage_elapsed, 3)
+            record["error_type"] = exc.__class__.__name__
+            record["error"] = str(exc)
+            _write_timing_snapshot()
             tail = _tail_log(stage_log_path)
             if tail:
                 print(f"[progress] stage {stage_name} failed. log tail:\n{tail}", file=sys.stderr)
             raise
 
+        heartbeat_stop.set()
+        heartbeat_thread.join()
         stage_elapsed = time.perf_counter() - stage_start
-        record = {
-            "index": index,
-            "name": stage_name,
-            "status": "ok",
-            "started_at": stage_started_at.isoformat(),
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "elapsed_seconds": round(stage_elapsed, 3),
-            "log_path": str(stage_log_path),
-        }
-        stage_records.append(record)
-        _write_timing_report(
-            report_path=timing_report_path,
-            run_id=run_id,
-            flow_path=args.flow,
-            operation=args.operation,
-            started_at=started_at,
-            stages=stage_records,
-        )
+        record["status"] = "ok"
+        record["finished_at"] = datetime.now(timezone.utc).isoformat()
+        record["updated_at"] = record["finished_at"]
+        record["elapsed_seconds"] = round(stage_elapsed, 3)
+        _write_timing_snapshot()
 
         elapsed_after = time.perf_counter() - total_start
         remaining = total_stages - index

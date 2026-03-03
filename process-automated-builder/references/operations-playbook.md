@@ -29,7 +29,22 @@ process-automated-builder/scripts/run-process-automated-builder.sh \
   -- --operation produce
 ```
 
-## 4) Stage Debugging
+## 4) Batch Parallel Run (Safe Wrapper)
+```bash
+process-automated-builder/scripts/run-process-automated-builder-parallel.sh \
+  --flow-dir /abs/path/to/flow-dir \
+  --out-dir /abs/path/to/batch-out \
+  --workers 3 \
+  --operation produce \
+  --python-bin process-automated-builder/.venv/bin/python
+```
+
+Notes:
+- Uses persistent `batch_state.json` and per-attempt logs in `batch_logs/`.
+- Avoids prior xargs/env leakage that could write logs to `/<file>.log` and trigger permission-denied false failures.
+- Supports auto-resume on interrupted sessions.
+
+## 5) Stage Debugging
 ```bash
 process-automated-builder/scripts/run-process-automated-builder.sh \
   --mode langgraph \
@@ -37,28 +52,88 @@ process-automated-builder/scripts/run-process-automated-builder.sh \
   -- --stop-after matches --operation produce
 ```
 
-## 5) Resume Existing Run
+## 6) Resume Existing Run
 ```bash
 process-automated-builder/scripts/run-process-automated-builder.sh \
   --mode langgraph \
   -- --resume --run-id <run_id>
 ```
 
-## 6) Publish Existing Run
+## 7) Publish Existing Run
 ```bash
 process-automated-builder/scripts/run-process-automated-builder.sh \
   --mode langgraph \
   -- --publish-only --run-id <run_id> --commit
 ```
 
+Optional debug switches during publish:
+- `--skip-flow-auto-build`
+- `--skip-process-update`
+
+## 7b) Run flow-auto-build Only
+```bash
+process-automated-builder/scripts/run-process-automated-builder.sh \
+  --mode langgraph \
+  -- flow-auto-build --run-id <run_id>
+```
+
+## 7c) Run process-update Only
+```bash
+process-automated-builder/scripts/run-process-automated-builder.sh \
+  --mode langgraph \
+  -- process-update --run-id <run_id>
+```
+
+## 8) Background Persistent Run (systemd user service)
+```bash
+# install service + default env template
+process-automated-builder/scripts/systemd/install-process-from-flow-batch-service.sh
+
+# edit runtime settings
+$EDITOR ~/.config/process-from-flow-batch/env
+
+# start and enable auto-restart
+systemctl --user daemon-reload
+systemctl --user enable --now process-from-flow-batch.service
+
+# monitor
+systemctl --user status process-from-flow-batch.service
+journalctl --user -u process-from-flow-batch.service -f
+```
+
+Notes:
+- Service runs batch runner with `--watch` and keeps polling `FLOW_DIR` for newly added `*.json`.
+- Service also loads `~/.openclaw/.env` by default for API/MCP credentials.
+- Service is configured with `Restart=always`; if runner is externally killed, it relaunches and continues from `STATE_PATH`.
+- Default `STALL_TIMEOUT_SECONDS` in env example is set to `1800` to reduce false positives on long stage-7 runs.
+
+## 8a) One-Command Submit to Daemon Queue
+```bash
+process-automated-builder/scripts/systemd/submit-process-from-flow.sh \
+  --flow-file /abs/path/to/reference-flow.json
+
+# or inline
+process-automated-builder/scripts/systemd/submit-process-from-flow.sh \
+  --flow-json '{"flowDataSet": {...}}'
+```
+
+Notes:
+- The submit script writes a uniquely named JSON into `FLOW_DIR`.
+- By default it also starts/enables `process-from-flow-batch.service`.
+
 ## Runtime Notes
 - New runs require flow input; no default flow file is used.
 - Resume mode can omit `--flow` and read it from cached state.
+- `flow-auto-build` and `process-update` subcommands also do not require `--flow`.
 - Flow-search MCP configuration is read from `TIANGONG_LCA_REMOTE_*` env vars.
 - OpenAI configuration is read from `OPENAI_*` (or `LCA_OPENAI_*`) env vars.
 - Literature MCP (`TianGong_KB_Remote`) can be configured by `TIANGONG_KB_REMOTE_*` env vars.
-- MinerU OCR client can be configured by `TIANGONG_MINERU_WITH_IMAGE_*` env vars.
+- MinerU OCR client can be configured by `TIANGONG_MINERU_WITH_IMAGE_*` env vars (`TIANGONG_MINERU_WITH_IMAGE_RETURN_TXT` defaults to `true`).
 - `--publish` and `--commit` may invoke remote CRUD services; use dry-run first.
+- `--publish` / `--publish-only` now execute one sequence: `flow-auto-build -> process-update -> flow publish -> process publish -> source publish`.
+- Method-policy auto-repair is enabled by default in flow-auto-build/process-update/publish paths; see `cache/method_policy_autofix_report.json` for deterministic fixes, retry attempts, and any `manual_required` residue.
+- LLM cost report is enabled by default in CLI runs; output path is `cache/llm_cost_report.json`.
+- Disable cost report with `--no-cost-report`; override prices with `--cost-input-price-per-1m` / `--cost-output-price-per-1m` or env `TIANGONG_PFF_COST_INPUT_PRICE_PER_1M` / `TIANGONG_PFF_COST_OUTPUT_PRICE_PER_1M`.
 
 ## Parallel Orchestration Rules
 - Run-level parallel (recommended):

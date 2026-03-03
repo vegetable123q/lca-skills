@@ -135,7 +135,14 @@ def main() -> None:
         raise SystemExit("Missing scientific_references in state.")
 
     api_key, model, base_url = load_openai_from_env()
-    llm = OpenAIResponsesLLM(api_key=api_key, model=model, base_url=base_url)
+    llm = OpenAIResponsesLLM(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        run_id=args.run_id,
+        module="process_from_flow_reference_usage_tagging",
+        stage="05_usage_tagging",
+    )
 
     fulltext_map = _build_fulltext_map(scientific_references)
     si_snippets = _load_si_snippets(scientific_references)

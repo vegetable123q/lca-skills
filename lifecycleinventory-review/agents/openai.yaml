@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lifecycle Inventory Review"
+  short_description: "Unified lifecycle inventory review with process/flow profiles"
+  default_prompt: "Use $lifecycleinventory-review to review process_from_flow outputs or a batch of flow JSON files with the appropriate profile."

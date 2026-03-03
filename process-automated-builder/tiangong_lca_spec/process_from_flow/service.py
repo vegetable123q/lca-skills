@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Literal, TypedDict, get_args, get_origin
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from zipfile import ZipFile
 
@@ -101,11 +101,13 @@ from tiangong_lca_spec.process_extraction.tidas_mapping import (
 )
 from tiangong_lca_spec.publishing.crud import DatabaseCrudClient
 from tiangong_lca_spec.state_lock import StateFileLockTimeout, hold_state_file_lock
+from tiangong_lca_spec.tidas.elementary_flow_classification_registry import infer_elementary_kind_and_compartment
 from tiangong_lca_spec.utils.translate import Translator
 
 from .prompts import (
     DATA_CUTOFF_COMPLETENESS_PROMPT,
     DENSITY_ESTIMATE_PROMPT,
+    EXCHANGE_IO_KIND_TAG_BATCH_PROMPT,
     EXCHANGE_VALUE_PROMPT,
     EXCHANGES_PROMPT,
     INDUSTRY_AVERAGE_PROMPT,
@@ -113,6 +115,7 @@ from .prompts import (
     PLACEHOLDER_QUERY_BUILDER_PROMPT,
     PLACEHOLDER_UUID_SELECTOR_PROMPT,
     PROCESS_SPLIT_PROMPT,
+    REFERENCE_OUTPUT_UNIT_PROMPT,
     REFERENCE_CLUSTER_PROMPT,
     TECH_DESCRIPTION_PROMPT,
 )
@@ -126,9 +129,6 @@ REFERENCE_CLUSTER_MAX_RECORDS = 2
 INDUSTRY_AVERAGE_TOP_K = 5
 REFERENCE_COUNTRY_PREFERENCE = "China"
 REFERENCE_COUNTRY_ALIASES = ("China", "Chinese", "中国")
-_LOCATION_DATA_DIR = Path(__file__).resolve().parents[3] / "input_data" / "location"
-_LOCATION_EN_PATH = _LOCATION_DATA_DIR / "tidas_locations.json"
-_LOCATION_ZH_PATH = _LOCATION_DATA_DIR / "tidas_locations_zh.json"
 _LOCATION_SPLIT_PATTERN = re.compile(r"[;,/|>]+")
 
 REFERENCE_SEARCH_KEY = "step_1a_reference_search"
@@ -149,12 +149,119 @@ SI_DOCX_MAX_TABLES = 6
 SI_DOCX_MAX_PARAGRAPHS = 40
 SI_XLSX_MAX_SHEETS = 3
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_FLOWPROPERTY_DIR = _REPO_ROOT / "input_data" / "flowproperties"
-_UNIT_GROUP_DIR = _REPO_ROOT / "input_data" / "units"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_RESOURCE_ROOT = _REPO_ROOT / "tiangong_lca_spec" / "resources"
+_LOCATION_DATA_DIR = _RESOURCE_ROOT / "location"
+_LOCATION_EN_PATH = _LOCATION_DATA_DIR / "tidas_locations.json"
+_LOCATION_ZH_PATH = _LOCATION_DATA_DIR / "tidas_locations_zh.json"
+_FLOWPROPERTY_DIR = _RESOURCE_ROOT / "flowproperties"
+_UNIT_GROUP_DIR = _RESOURCE_ROOT / "units"
 _PFF_RUNTIME_STATE_PATH_ENV = "TIANGONG_PFF_STATE_PATH"
 _PFF_RUNTIME_RUN_ID_ENV = "TIANGONG_PFF_RUN_ID"
 _PFF_RUNTIME_ARTIFACTS_ROOT = Path("artifacts/process_from_flow")
+_ILCD_GUARDRAILS_PATH = _REPO_ROOT / "references" / "ilcd_method_guardrails.md"
+_REFERENCE_OUTPUT_POLICY_PATH = _REPO_ROOT / "references" / "reference_output_policy.json"
+
+_REFERENCE_OUTPUT_DEFAULT_POLICY: dict[str, Any] = {
+    "reference_output": {
+        "fallback_unit": "unit",
+        "prefer_physical_dimensions": ["mass", "energy", "volume", "area", "length"],
+        "allow_count_unit_fallback": True,
+        "llm_enabled": True,
+        "llm_min_confidence": 0.55,
+        "low_confidence_threshold": 0.45,
+    },
+    "hard_rules": {
+        "forbid_lcia_units_for_product_waste": True,
+        "forbid_lcia_keywords_for_product_waste": True,
+    },
+    "lcia_tokens": {
+        "unit_tokens": [
+            "ctue",
+            "ctuh",
+            "daly",
+            "kgco2eq",
+            "kgco2e",
+            "kgso2eq",
+            "kgpo4eq",
+            "kgpo43eq",
+            "kgpm25eq",
+            "m3a",
+            "m3*d",
+        ],
+        "name_keywords": [
+            "impact",
+            "potential",
+            "gwp",
+            "adp",
+            "ep",
+            "ped",
+            "ri",
+            "ctue",
+            "ctuh",
+            "daly",
+            "acidification",
+            "eutrophication",
+            "photochemical",
+        ],
+    },
+    "impact_flow_property_ids": [
+        "585d3441-af58-49c9-a5c2-1d1e5b63f8d5",
+        "f65d356a-d702-4d79-850e-dd68b47bbcd9",
+    ],
+    "reference_unit_overrides": [],
+}
+
+
+@lru_cache(maxsize=1)
+def _load_ilcd_guardrails_excerpt(*, max_chars: int = 2600) -> str:
+    """Load lightweight ILCD guardrails excerpt for prompt-time policy grounding."""
+
+    try:
+        text = _ILCD_GUARDRAILS_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    compact = "\n".join(line.rstrip() for line in text.splitlines())
+    if len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip() + "\n..."
+    return compact
+
+
+def _deep_merge_mapping(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_mapping(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+@lru_cache(maxsize=1)
+def _load_reference_output_policy() -> dict[str, Any]:
+    policy = copy.deepcopy(_REFERENCE_OUTPUT_DEFAULT_POLICY)
+    path = _REFERENCE_OUTPUT_POLICY_PATH
+    if not path.exists():
+        return policy
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pylint: disable=broad-except
+        LOGGER.warning(
+            "process_from_flow.reference_output_policy_load_failed",
+            path=str(path),
+            error=str(exc),
+        )
+        return policy
+    if not isinstance(loaded, dict):
+        LOGGER.warning(
+            "process_from_flow.reference_output_policy_invalid",
+            path=str(path),
+            reason="top_level_not_object",
+        )
+        return policy
+    return _deep_merge_mapping(policy, loaded)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,8 +285,29 @@ class FlowReferenceInfo:
     unit_group: UnitGroupInfo | None
 
 
+@dataclass(frozen=True, slots=True)
+class FlowPropertyUnitRegistryEntry:
+    flow_property_id: str
+    flow_property_name: str
+    unit_group_id: str | None
+    unit_group_name: str | None
+    reference_unit: str | None
+    allowed_units: tuple[str, ...]
+    dimension: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FlowMatchRoutingResult:
+    candidates: list[FlowCandidate]
+    routing_decision: dict[str, Any]
+    compartment_decision: dict[str, Any]
+    manual_review_required: bool
+    trace: list[dict[str, Any]]
+
+
 _FLOW_PROPERTY_CACHE: dict[str, FlowPropertyInfo] = {}
 _UNIT_GROUP_CACHE: dict[str, UnitGroupInfo] = {}
+_ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED = False
 
 
 FLOW_QUERY_REWRITE_PROMPT = (
@@ -604,6 +732,80 @@ def _resolve_location_code(
         if llm_code:
             return llm_code
     return "GLO"
+
+
+@lru_cache(maxsize=1)
+def _allowed_process_location_codes() -> set[str]:
+    field = ProcessInformationGeographyLocationOfOperationSupplyOrProduction.model_fields.get("location")
+    if field is None:
+        return set()
+
+    def _collect(annotation: Any) -> set[str]:
+        origin = get_origin(annotation)
+        args = get_args(annotation)
+        if origin is Literal:
+            return {str(item).strip().upper() for item in args if isinstance(item, str) and str(item).strip()}
+        values: set[str] = set()
+        for item in args:
+            values |= _collect(item)
+        return values
+
+    return _collect(field.annotation)
+
+
+def _repair_location_code_after_validation_error(
+    *,
+    location_code: str | None,
+    geo_candidates: list[str],
+    mix_location: str | None,
+) -> tuple[str | None, str | None]:
+    allowed_codes = _allowed_process_location_codes()
+    if not allowed_codes:
+        return None, "schema_allowed_codes_unavailable"
+
+    normalized = _normalize_location_code(location_code, allowed_codes)
+    if normalized:
+        return normalized, "schema_accepts_original"
+
+    _code_to_en, _code_to_zh, name_to_code = _load_location_maps()
+    seeds: list[str] = []
+    for raw in [location_code, *geo_candidates, mix_location]:
+        text = str(raw or "").strip()
+        if text and text not in seeds:
+            seeds.append(text)
+
+    # 1) Try location catalog/name lookup first, but keep only schema-allowed targets.
+    for seed in seeds:
+        looked_up = _lookup_location_code(seed, name_to_code)
+        looked_up_normalized = _normalize_location_code(looked_up, allowed_codes)
+        if looked_up_normalized:
+            return looked_up_normalized, "name_lookup"
+
+    # 2) Try token decomposition (e.g. US-CAMX -> US).
+    for seed in seeds:
+        token_candidates: list[str] = []
+        for chunk in re.split(r"[^A-Za-z0-9-]+", seed.upper()):
+            piece = chunk.strip("-")
+            if not piece:
+                continue
+            token_candidates.append(piece)
+            if "-" in piece:
+                parts = [p for p in piece.split("-") if p]
+                if parts:
+                    token_candidates.append(parts[0])
+        for token in token_candidates:
+            norm = _normalize_location_code(token, allowed_codes)
+            if norm:
+                return norm, "token_fallback"
+
+    # 3) Safe fallback.
+    if "GLO" in allowed_codes:
+        return "GLO", "fallback_glo"
+    if "CN" in allowed_codes:
+        return "CN", "fallback_cn"
+    if allowed_codes:
+        return sorted(allowed_codes)[0], "fallback_first_allowed"
+    return None, "no_fallback"
 
 
 def _compact_text(value: str, *, limit: int = 160) -> str:
@@ -1842,22 +2044,40 @@ def _load_si_snippets(scientific_references: dict[str, Any]) -> list[dict[str, A
     for entry in entries:
         if not isinstance(entry, dict):
             continue
+        doi = str(entry.get("doi") or "").strip() or None
+        snippet = ""
+        source_path = ""
+
         output_path = entry.get("output_path")
-        if not isinstance(output_path, str) or not output_path.strip():
-            continue
-        path = Path(output_path)
-        if not path.exists():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        blocks = _extract_mineru_text_blocks(payload, max_blocks=SI_SNIPPET_MAX_BLOCKS)
-        snippet = _collect_snippet(blocks, max_chars=SI_SNIPPET_MAX_CHARS)
+        if isinstance(output_path, str) and output_path.strip():
+            path = Path(output_path)
+            if path.exists():
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = None
+                if payload is not None:
+                    blocks = _extract_mineru_text_blocks(payload, max_blocks=SI_SNIPPET_MAX_BLOCKS)
+                    snippet = _collect_snippet(blocks, max_chars=SI_SNIPPET_MAX_CHARS)
+                    if snippet:
+                        source_path = str(path)
+
+        if not snippet:
+            output_text_path = entry.get("output_text_path") or entry.get("text_output_path")
+            if isinstance(output_text_path, str) and output_text_path.strip():
+                text_path = Path(output_text_path)
+                if text_path.exists():
+                    try:
+                        raw_text = text_path.read_text(encoding="utf-8")
+                    except OSError:
+                        raw_text = ""
+                    snippet = _collect_snippet([raw_text], max_chars=SI_SNIPPET_MAX_CHARS)
+                    if snippet:
+                        source_path = str(text_path)
+
         if not snippet:
             continue
-        doi = str(entry.get("doi") or "").strip() or None
-        add_candidate(doi, snippet, str(path), source_type="mineru", source_rank=3)
+        add_candidate(doi, snippet, source_path, source_type="mineru", source_rank=3)
 
     for entry in _iter_si_text_entries(scientific_references):
         doi = str(entry.get("doi") or "").strip() or None
@@ -1986,6 +2206,21 @@ _UNIT_DIMENSIONS: dict[str, tuple[str, float]] = {
     "dm3": ("volume", 0.001),
     "cm3": ("volume", 1.0e-6),
     "ml": ("volume", 1.0e-6),
+    "m2": ("area", 1.0),
+    "cm2": ("area", 1.0e-4),
+    "ha": ("area", 1.0e4),
+    "m": ("length", 1.0),
+    "cm": ("length", 1.0e-2),
+    "km": ("length", 1.0e3),
+    "piece": ("items", 1.0),
+    "pieces": ("items", 1.0),
+    "pc": ("items", 1.0),
+    "pcs": ("items", 1.0),
+    "item(s)": ("items", 1.0),
+    "dozen(s)": ("items", 12.0),
+    "ea": ("items", 1.0),
+    "unit": ("items", 1.0),
+    "units": ("items", 1.0),
 }
 
 _AMBIGUOUS_BALANCE_UNITS = {
@@ -2151,6 +2386,53 @@ def _flow_reference_info_from_dataset(flow_dataset: dict[str, Any] | None) -> Fl
     return FlowReferenceInfo(flow_property_id=flow_property_id, unit_group=unit_group)
 
 
+def _dataset_ids_from_directory(directory: Path) -> list[str]:
+    if not directory.exists():
+        return []
+    identifiers: set[str] = set()
+    for path in directory.glob("*.json"):
+        stem = path.stem
+        token = stem.split("_", 1)[0].strip()
+        if token:
+            identifiers.add(token)
+    return sorted(identifiers)
+
+
+@lru_cache(maxsize=1)
+def _load_flow_property_unit_registry() -> dict[str, FlowPropertyUnitRegistryEntry]:
+    registry: dict[str, FlowPropertyUnitRegistryEntry] = {}
+    for flow_property_id in _dataset_ids_from_directory(_FLOWPROPERTY_DIR):
+        flow_property = _get_flow_property_info(flow_property_id)
+        if not flow_property:
+            continue
+        unit_group = _get_unit_group_info(flow_property.unit_group_id) if flow_property.unit_group_id else None
+        allowed_units = tuple(sorted((unit_group.units or {}).keys())) if unit_group else ()
+        reference_unit = unit_group.reference_unit if unit_group else None
+        registry[flow_property_id] = FlowPropertyUnitRegistryEntry(
+            flow_property_id=flow_property.flow_property_id,
+            flow_property_name=flow_property.name,
+            unit_group_id=flow_property.unit_group_id,
+            unit_group_name=unit_group.name if unit_group else None,
+            reference_unit=reference_unit,
+            allowed_units=allowed_units,
+            dimension=_unit_group_category(unit_group),
+        )
+    return registry
+
+
+def _flow_property_registry_entry(
+    flow_property_id: str | None,
+    *,
+    registry: dict[str, FlowPropertyUnitRegistryEntry] | None = None,
+) -> FlowPropertyUnitRegistryEntry | None:
+    token = str(flow_property_id or "").strip()
+    if not token:
+        return None
+    if isinstance(registry, dict):
+        return registry.get(token)
+    return _load_flow_property_unit_registry().get(token)
+
+
 def _convert_amount_with_unit_group(amount: float, unit: str, unit_group: UnitGroupInfo) -> float | None:
     unit_key = _normalize_unit_token(unit)
     if not unit_key:
@@ -2161,36 +2443,38 @@ def _convert_amount_with_unit_group(amount: float, unit: str, unit_group: UnitGr
     return amount * factor
 
 
-def _unit_group_dimension(unit_group: UnitGroupInfo | None) -> str | None:
-    if not unit_group or not unit_group.name:
+_UNIT_GROUP_CATEGORY_BY_NAME: dict[str, str] = {
+    "units of mass": "mass",
+    "units of energy": "energy",
+    "units of volume": "volume",
+    "units of items": "items",
+    "units of area": "area",
+    "units of length": "length",
+    "units of mole": "mole",
+    "units of radioactivity": "radioactivity",
+    "units of mass*time": "mass_time",
+    "units of area*time": "area_time",
+    "units of volume*time": "volume_time",
+    "unit of kg*km": "mass_distance",
+    "unit of currency": "currency",
+    "sej": "sej",
+}
+
+
+def _unit_group_name_to_category(name: str | None) -> str | None:
+    if not name:
         return None
-    name = unit_group.name.strip().lower()
-    if name == "units of mass":
-        return "mass"
-    if name == "units of energy":
-        return "energy"
-    return None
+    normalized = re.sub(r"\s+", " ", str(name).strip().lower())
+    return _UNIT_GROUP_CATEGORY_BY_NAME.get(normalized)
+
+
+def _unit_group_dimension(unit_group: UnitGroupInfo | None) -> str | None:
+    category = _unit_group_name_to_category(unit_group.name if unit_group else None)
+    return category if category in {"mass", "energy"} else None
 
 
 def _unit_group_category(unit_group: UnitGroupInfo | None) -> str | None:
-    if not unit_group or not unit_group.name:
-        return None
-    name = unit_group.name.strip().lower()
-    if name == "units of mass":
-        return "mass"
-    if name == "units of energy":
-        return "energy"
-    if name == "units of volume":
-        return "volume"
-    if name == "units of items":
-        return "items"
-    if name == "units of area":
-        return "area"
-    if name == "units of length":
-        return "length"
-    if name == "units of mole":
-        return "mole"
-    return None
+    return _unit_group_name_to_category(unit_group.name if unit_group else None)
 
 
 def _unit_dimension_from_unit(unit: str | None) -> str | None:
@@ -2940,7 +3224,7 @@ def _sanitize_exchange_comment_tag_value(value: Any, *, fallback: str) -> str:
 
 
 def _exchange_comment_tag_block(*, flow_kind: Any, unit: Any) -> str:
-    normalized_kind = _normalize_flow_type(flow_kind) or str(flow_kind or "").strip().lower() or "unknown"
+    normalized_kind = _normalize_io_kind_tag(flow_kind) or str(flow_kind or "").strip().lower() or "unknown"
     kind_tag = _sanitize_exchange_comment_tag_value(normalized_kind, fallback="unknown")
     unit_tag = _sanitize_exchange_comment_tag_value(unit, fallback="unit")
     return f"[{_EXCHANGE_KIND_TAG_NAME}={kind_tag}] [{_EXCHANGE_UNIT_TAG_NAME}={unit_tag}]"
@@ -3011,14 +3295,7 @@ def _resolve_exchange_comment_tag_unit(
 
 def _ensure_exchange_comment_tags(exchange: dict[str, Any], *, preferred_unit: str | None = None) -> None:
     direction = str(exchange.get("exchangeDirection") or "").strip()
-    is_reference = bool(exchange.get("is_reference_flow"))
-    flow_kind = _normalize_flow_type(exchange.get("flow_type") or exchange.get("flowType"))
-    if not flow_kind:
-        flow_kind = _infer_flow_type(
-            str(exchange.get("exchangeName") or ""),
-            direction=direction,
-            is_reference_flow=is_reference,
-        )
+    flow_kind = _exchange_kind_for_comment_tag(exchange, direction=direction)
     unit = str(preferred_unit or "").strip()
     if not unit:
         unit = _resolve_exchange_comment_tag_unit(exchange)
@@ -3027,6 +3304,172 @@ def _ensure_exchange_comment_tags(exchange: dict[str, Any], *, preferred_unit: s
         flow_kind=flow_kind,
         unit=unit,
     )
+
+
+def _exchange_kind_for_comment_tag(exchange: dict[str, Any], *, direction: str) -> str:
+    explicit_tag_kind = _normalize_io_kind_tag(
+        exchange.get("io_kind_tag")
+        or exchange.get(_EXCHANGE_KIND_TAG_NAME)
+    )
+    if explicit_tag_kind:
+        return explicit_tag_kind
+    tags = _parse_exchange_comment_tags(exchange.get("generalComment"))
+    existing_comment_tag_kind = _normalize_io_kind_tag(tags.get(_EXCHANGE_KIND_TAG_NAME))
+    if existing_comment_tag_kind:
+        return existing_comment_tag_kind
+    return _derive_exchange_io_kind_tag(exchange, direction=direction)
+
+
+def _derive_exchange_io_kind_tag(exchange: dict[str, Any], *, direction: str) -> str:
+    material_role = _normalize_material_role(exchange.get("material_role") or exchange.get("materialRole"))
+    if material_role and material_role != "unknown":
+        return material_role
+    if bool(exchange.get("is_reference_flow")):
+        return "product"
+    flow_type = _normalize_flow_type(exchange.get("flow_type") or exchange.get("flowType"))
+    if not flow_type:
+        flow_type = _exchange_flow_type_for_dedupe(exchange, direction=direction)
+    if flow_type == "elementary":
+        return "resource" if direction == "Input" else "emission" if direction == "Output" else "unknown"
+    if flow_type in {"product", "waste", "service"}:
+        return flow_type
+    return "unknown"
+
+
+def _parse_exchange_io_kind_tag_batch_response(data: dict[str, Any]) -> dict[str, str]:
+    items = data.get("exchanges") or data.get("items") or []
+    if not isinstance(items, list):
+        return {}
+    parsed: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        exchange_id = str(item.get("id") or item.get("exchange_id") or item.get("exchangeId") or "").strip()
+        if not exchange_id:
+            continue
+        io_kind_tag = _normalize_io_kind_tag(
+            item.get("io_kind_tag")
+            or item.get("ioKindTag")
+            or item.get("flow_type")
+            or item.get("flowType")
+        )
+        if io_kind_tag:
+            parsed[exchange_id] = io_kind_tag
+    return parsed
+
+
+def _batch_classify_exchange_io_kind_tags(
+    *,
+    llm: LanguageModelProtocol | None,
+    flow_summary: dict[str, Any] | None,
+    process_plan: dict[str, Any] | None,
+    process_id: str | None,
+    operation: str | None,
+    exchanges: list[dict[str, Any]],
+) -> None:
+    if llm is None or not isinstance(exchanges, list) or len(exchanges) <= 1:
+        # For a single exchange, joint classification provides no benefit.
+        for exchange in exchanges or []:
+            if isinstance(exchange, dict) and bool(exchange.get("is_reference_flow")):
+                exchange["io_kind_tag"] = "product"
+        return
+
+    process_struct = (process_plan or {}).get("structure") if isinstance((process_plan or {}).get("structure"), dict) else {}
+    labeled_exchanges: list[dict[str, Any]] = []
+    id_to_exchange: dict[str, dict[str, Any]] = {}
+    for idx, exchange in enumerate(exchanges, start=1):
+        if not isinstance(exchange, dict):
+            continue
+        exchange_id = f"E{idx}"
+        id_to_exchange[exchange_id] = exchange
+        labeled_exchanges.append(
+            {
+                "id": exchange_id,
+                "exchangeName": str(exchange.get("exchangeName") or "").strip(),
+                "exchangeDirection": str(exchange.get("exchangeDirection") or "").strip() or None,
+                "generalComment": _strip_exchange_comment_tags(exchange.get("generalComment")) or None,
+                "unit": str(exchange.get("unit") or "").strip() or None,
+                "is_reference_flow": bool(exchange.get("is_reference_flow")),
+                "existing_io_kind_tag": _normalize_io_kind_tag(
+                    exchange.get("io_kind_tag") or exchange.get(_EXCHANGE_KIND_TAG_NAME)
+                ),
+                "existing_flow_type": _normalize_flow_type(exchange.get("flow_type") or exchange.get("flowType")),
+                "material_role": _normalize_material_role(exchange.get("material_role") or exchange.get("materialRole")),
+                "search_hints": exchange.get("search_hints") if isinstance(exchange.get("search_hints"), list) else [],
+            }
+        )
+    if len(labeled_exchanges) <= 1:
+        for exchange in exchanges:
+            if isinstance(exchange, dict) and bool(exchange.get("is_reference_flow")):
+                exchange["io_kind_tag"] = "product"
+        return
+
+    process_context = {
+        "process_id": str(process_id or (process_plan or {}).get("process_id") or (process_plan or {}).get("processId") or "").strip() or None,
+        "name": str((process_plan or {}).get("name") or "").strip() or None,
+        "reference_flow_name": str((process_plan or {}).get("reference_flow_name") or "").strip() or None,
+        "is_reference_flow_process": bool((process_plan or {}).get("is_reference_flow_process")),
+        "structure": {
+            "technology": str(process_struct.get("technology") or "").strip() or None,
+            "inputs": _clean_string_list(process_struct.get("inputs")),
+            "outputs": _clean_string_list(process_struct.get("outputs")),
+            "boundary": str(process_struct.get("boundary") or "").strip() or None,
+        },
+    }
+    flow_context = {
+        "base_name_en": str((flow_summary or {}).get("base_name_en") or "").strip() or None,
+        "base_name_zh": str((flow_summary or {}).get("base_name_zh") or "").strip() or None,
+        "treatment_en": str((flow_summary or {}).get("treatment_en") or "").strip() or None,
+        "mix_en": str((flow_summary or {}).get("mix_en") or "").strip() or None,
+        "general_comment_en": _compact_text((flow_summary or {}).get("general_comment_en") or "", limit=300) or None,
+        "classification": (flow_summary or {}).get("classification") if isinstance((flow_summary or {}).get("classification"), list) else None,
+    }
+    payload = {
+        "prompt": EXCHANGE_IO_KIND_TAG_BATCH_PROMPT,
+        "context": {
+            "operation": str(operation or "").strip() or None,
+            "flow": flow_context,
+            "process": process_context,
+            "exchanges": labeled_exchanges,
+        },
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        raw = llm.invoke(payload)
+        data = _ensure_dict(raw)
+    except Exception as exc:  # pylint: disable=broad-except
+        LOGGER.warning(
+            "process_from_flow.batch_io_kind_tag_classification_failed",
+            process_id=str(process_id or "").strip() or None,
+            error=str(exc),
+        )
+        data = {}
+
+    result_map = _parse_exchange_io_kind_tag_batch_response(data) if data else {}
+    updated_count = 0
+    for exchange_id, io_kind_tag in result_map.items():
+        exchange = id_to_exchange.get(exchange_id)
+        if not isinstance(exchange, dict):
+            continue
+        if bool(exchange.get("is_reference_flow")):
+            io_kind_tag = "product"
+        previous = _normalize_io_kind_tag(exchange.get("io_kind_tag") or exchange.get(_EXCHANGE_KIND_TAG_NAME))
+        if previous != io_kind_tag:
+            exchange["io_kind_tag"] = io_kind_tag
+            updated_count += 1
+
+    # Keep reference flows stable even if the batch response omits them.
+    for exchange in exchanges:
+        if isinstance(exchange, dict) and bool(exchange.get("is_reference_flow")):
+            exchange["io_kind_tag"] = "product"
+
+    if updated_count > 0:
+        LOGGER.info(
+            "process_from_flow.batch_io_kind_tag_classification_applied",
+            process_id=str(process_id or "").strip() or None,
+            exchange_total=len(labeled_exchanges),
+            updated_count=updated_count,
+        )
 
 
 def _parse_industry_average_response(data: dict[str, Any]) -> tuple[str | None, str | None, list[str], str | None]:
@@ -3687,6 +4130,45 @@ _MATERIAL_ROLE_ALIASES = {
     "service": "service",
     "unknown": "unknown",
 }
+_IO_KIND_TAG_VALUES = {
+    "raw_material",
+    "auxiliary",
+    "catalyst",
+    "energy",
+    "resource",
+    "emission",
+    "product",
+    "waste",
+    "service",
+    "unknown",
+}
+_IO_KIND_TAG_ALIASES = {
+    "raw": "raw_material",
+    "raw material": "raw_material",
+    "feedstock": "raw_material",
+    "auxiliary material": "auxiliary",
+    "additive": "auxiliary",
+    "elementary_resource": "resource",
+    "natural_resource": "resource",
+    "natural resource": "resource",
+    "resource": "resource",
+    "elementary_emission": "emission",
+    "air_emission": "emission",
+    "water_emission": "emission",
+    "soil_emission": "emission",
+    "air emission": "emission",
+    "water emission": "emission",
+    "soil emission": "emission",
+    "emission": "emission",
+    "product": "product",
+    "waste": "waste",
+    "service": "service",
+    "energy": "energy",
+    "catalyst": "catalyst",
+    "auxiliary": "auxiliary",
+    "raw_material": "raw_material",
+    "unknown": "unknown",
+}
 _BALANCE_EXCLUDE_ROLES = {"auxiliary", "catalyst"}
 _BALANCE_CORE_ROLES = {"raw_material", "product", "waste"}
 
@@ -3705,12 +4187,18 @@ class ProcessFromFlowState(TypedDict, total=False):
     technology_routes: list[dict[str, Any]]
     process_routes: list[dict[str, Any]]
     selected_route_id: str
+    reference_output_decision_summary: dict[str, Any]
     intended_applications: dict[str, dict[str, str]] | dict[str, str] | list[str]
     processes: list[dict[str, Any]]
     process_exchanges: list[dict[str, Any]]
+    chain_contract: list[dict[str, Any]]
+    chain_preflight: dict[str, Any]
+    chain_link_enforcement: dict[str, Any]
     exchange_value_candidates: list[dict[str, Any]]
     exchange_values_applied: bool
     matched_process_exchanges: list[dict[str, Any]]
+    chain_uuid_sync: dict[str, Any]
+    chain_uuid_verify: dict[str, Any]
     process_datasets: list[dict[str, Any]]
     source_datasets: list[dict[str, Any]]
     source_references: list[dict[str, Any]]
@@ -4487,6 +4975,234 @@ def _coerce_classification_hints(value: Any, *, max_items: int = 6) -> list[str]
     return hints
 
 
+def _candidate_classification_texts(candidate: FlowCandidate) -> list[str]:
+    texts: list[str] = []
+    if isinstance(candidate.classification, list):
+        for entry in candidate.classification:
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get("#text") or entry.get("text") or "").strip()
+            if text and text not in texts:
+                texts.append(text)
+    category_path = str(candidate.category_path or "").strip()
+    if category_path:
+        for part in category_path.split(">"):
+            cleaned = str(part).strip()
+            if cleaned and cleaned not in texts:
+                texts.append(cleaned)
+    return texts
+
+
+def _candidate_elementary_kind_and_compartment(candidate: FlowCandidate) -> tuple[str | None, str | None]:
+    global _ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED
+    try:
+        kind, compartment = infer_elementary_kind_and_compartment(
+            candidate.classification if isinstance(candidate.classification, list) else None,
+            category_path=str(candidate.category_path or "").strip() or None,
+            general_comment=str(candidate.general_comment or "").strip() or None,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        if not _ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED:
+            LOGGER.warning("process_from_flow.elementary_category_inference_failed", error=str(exc))
+            _ELEMENTARY_CATEGORY_INFERENCE_WARNING_EMITTED = True
+        kind, compartment = None, None
+    if kind is None:
+        combined_text = " ".join(
+            [
+                str(candidate.category_path or ""),
+                str(candidate.general_comment or ""),
+                " ".join(_candidate_classification_texts(candidate)),
+            ]
+        ).lower()
+        if "resource" in combined_text:
+            kind = "resource"
+        elif "emission" in combined_text:
+            kind = "emission"
+    if kind == "emission" and compartment is None:
+        combined_text = " ".join(
+            [
+                str(candidate.category_path or ""),
+                str(candidate.general_comment or ""),
+                " ".join(_candidate_classification_texts(candidate)),
+            ]
+        )
+        compartment = _normalize_compartment_value(_infer_media_suffix(combined_text))
+    if kind != "emission":
+        compartment = None
+    return kind, compartment
+
+
+def _expected_elementary_kind_for_routing(
+    *,
+    expected_flow_type: str | None,
+    direction: str | None,
+    io_kind_tag: str | None,
+) -> str | None:
+    normalized_kind = _normalize_io_kind_tag(io_kind_tag)
+    if normalized_kind in {"resource", "emission"}:
+        return normalized_kind
+    if expected_flow_type != "elementary":
+        return None
+    if direction == "Input":
+        return "resource"
+    if direction == "Output":
+        return "emission"
+    return None
+
+
+def _route_flow_match_candidates(
+    candidates: list[FlowCandidate],
+    *,
+    expected_flow_type: str | None,
+    direction: str | None,
+    io_kind_tag: str | None,
+    expected_compartment: str | None,
+) -> FlowMatchRoutingResult:
+    source = [candidate for candidate in candidates if isinstance(candidate, FlowCandidate)]
+    normalized_type = _normalize_flow_type(expected_flow_type)
+    normalized_direction = _normalize_exchange_direction_value(direction)
+    normalized_io_kind = _normalize_io_kind_tag(io_kind_tag)
+    elementary_kind = _expected_elementary_kind_for_routing(
+        expected_flow_type=normalized_type,
+        direction=normalized_direction,
+        io_kind_tag=normalized_io_kind,
+    )
+    compartment = _normalize_compartment_value(expected_compartment)
+    if elementary_kind != "emission":
+        compartment = None
+
+    trace: list[dict[str, Any]] = []
+    metadata_cache: dict[int, tuple[str | None, str | None, str | None]] = {}
+
+    def _candidate_metadata(candidate: FlowCandidate) -> tuple[str | None, str | None, str | None]:
+        key = id(candidate)
+        cached = metadata_cache.get(key)
+        if cached is not None:
+            return cached
+        candidate_type = _normalize_flow_type(candidate.flow_type)
+        candidate_kind, candidate_compartment = _candidate_elementary_kind_and_compartment(candidate)
+        metadata = (candidate_type, candidate_kind, candidate_compartment)
+        metadata_cache[key] = metadata
+        return metadata
+
+    def _apply_stage(
+        stage: str,
+        values: list[FlowCandidate],
+        *,
+        apply_type: bool,
+        apply_kind: bool,
+        apply_compartment: bool,
+    ) -> list[FlowCandidate]:
+        filtered: list[FlowCandidate] = []
+        for candidate in values:
+            candidate_type, candidate_kind, candidate_compartment = _candidate_metadata(candidate)
+            if apply_type and normalized_type and candidate_type != normalized_type:
+                continue
+            if apply_kind and elementary_kind and candidate_kind != elementary_kind:
+                continue
+            if apply_compartment and compartment and candidate_compartment != compartment:
+                continue
+            filtered.append(candidate)
+        filters_applied: list[str] = []
+        if apply_type and normalized_type:
+            filters_applied.append(f"flow_type={normalized_type}")
+        if apply_kind and elementary_kind:
+            filters_applied.append(f"elementary_kind={elementary_kind}")
+        if apply_compartment and compartment:
+            filters_applied.append(f"compartment={compartment}")
+        trace.append(
+            {
+                "stage": stage,
+                "before": len(values),
+                "after": len(filtered),
+                "filters": filters_applied,
+            }
+        )
+        return filtered
+
+    selected = list(source)
+    selected_stage = "no_filter"
+    manual_review_required = False
+
+    has_constraints = bool(normalized_type or elementary_kind or compartment)
+    if has_constraints:
+        strict = _apply_stage(
+            "strict",
+            source,
+            apply_type=True,
+            apply_kind=True,
+            apply_compartment=True,
+        )
+        if strict:
+            selected = strict
+            selected_stage = "strict"
+        else:
+            if compartment:
+                relaxed_compartment = _apply_stage(
+                    "relax_compartment",
+                    source,
+                    apply_type=True,
+                    apply_kind=True,
+                    apply_compartment=False,
+                )
+                if relaxed_compartment:
+                    selected = relaxed_compartment
+                    selected_stage = "relax_compartment"
+            if selected_stage == "no_filter" and elementary_kind:
+                relaxed_kind = _apply_stage(
+                    "relax_elementary_kind",
+                    source,
+                    apply_type=True,
+                    apply_kind=False,
+                    apply_compartment=False,
+                )
+                if relaxed_kind:
+                    selected = relaxed_kind
+                    selected_stage = "relax_elementary_kind"
+            if selected_stage == "no_filter" and normalized_type:
+                cross_type_with_kind = _apply_stage(
+                    "cross_type_keep_kind",
+                    source,
+                    apply_type=False,
+                    apply_kind=bool(elementary_kind),
+                    apply_compartment=bool(compartment and elementary_kind == "emission"),
+                )
+                if cross_type_with_kind:
+                    selected = cross_type_with_kind
+                    selected_stage = "cross_type_keep_kind"
+            if selected_stage == "no_filter":
+                selected = _apply_stage(
+                    "cross_type_unfiltered",
+                    source,
+                    apply_type=False,
+                    apply_kind=False,
+                    apply_compartment=False,
+                )
+                selected_stage = "cross_type_unfiltered"
+
+    if selected_stage in {"relax_elementary_kind", "cross_type_keep_kind", "cross_type_unfiltered"}:
+        manual_review_required = True
+
+    return FlowMatchRoutingResult(
+        candidates=selected,
+        routing_decision={
+            "expected_flow_type": normalized_type,
+            "expected_elementary_kind": elementary_kind,
+            "direction": normalized_direction,
+            "io_kind_tag": normalized_io_kind,
+            "selected_stage": selected_stage,
+            "candidate_total": len(source),
+            "selected_total": len(selected),
+        },
+        compartment_decision={
+            "expected_compartment": compartment,
+            "selected_stage": selected_stage if compartment else None,
+        },
+        manual_review_required=manual_review_required,
+        trace=trace,
+    )
+
+
 def _compose_placeholder_query_text(
     *,
     exchange_name: str,
@@ -4495,6 +5211,7 @@ def _compose_placeholder_query_text(
     classification_hints: list[str] | None,
     flow_type: str | None,
     direction: str | None,
+    io_kind: str | None,
     unit: str | None,
     compartment: str | None,
 ) -> str:
@@ -4510,6 +5227,8 @@ def _compose_placeholder_query_text(
         constraint_bits.append(f"flow_type={flow_type}")
     if direction:
         constraint_bits.append(f"direction={direction}")
+    if io_kind:
+        constraint_bits.append(f"io_kind={io_kind}")
     if unit:
         constraint_bits.append(f"unit={unit}")
     if compartment:
@@ -4530,6 +5249,8 @@ def _compose_placeholder_query_text(
         parts.append(f"flow_type: {flow_type}")
     if direction:
         parts.append(f"direction: {direction}")
+    if io_kind:
+        parts.append(f"io_kind: {io_kind}")
     if unit:
         parts.append(f"unit: {unit}")
     if compartment:
@@ -4544,12 +5265,14 @@ def _build_placeholder_one_shot_query_payload(
     comment: str | None,
     flow_type: str | None,
     direction: str | None,
+    io_kind_tag: str | None,
     unit: str | None,
     expected_compartment: str | None,
     search_hints: list[str] | None,
 ) -> dict[str, Any]:
     fallback_flow_type = _normalize_flow_type(flow_type)
     fallback_direction = _normalize_exchange_direction_value(direction)
+    fallback_io_kind = _normalize_io_kind_tag(io_kind_tag)
     fallback_unit = str(unit or "").strip() or None
     fallback_compartment = _normalize_compartment_value(expected_compartment) or _infer_media_suffix(f"{exchange_name} {comment or ''}")
     fallback_cas = _extract_cas_number([exchange_name, comment, search_hints or []])
@@ -4562,6 +5285,7 @@ def _build_placeholder_one_shot_query_payload(
         "classification_hints": fallback_hints,
         "flow_type": fallback_flow_type,
         "direction": fallback_direction,
+        "io_kind": fallback_io_kind,
         "unit": fallback_unit,
         "compartment": fallback_compartment,
     }
@@ -4573,6 +5297,7 @@ def _build_placeholder_one_shot_query_payload(
                 "general_comment": comment,
                 "flow_type": fallback_flow_type,
                 "direction": fallback_direction,
+                "io_kind": fallback_io_kind,
                 "unit": fallback_unit,
                 "compartment": fallback_compartment,
                 "search_hints": search_hints or [],
@@ -4594,6 +5319,7 @@ def _build_placeholder_one_shot_query_payload(
         payload["classification_hints"] = _coerce_classification_hints(data.get("classification_hints") or data.get("classification") or payload["classification_hints"])
         payload["flow_type"] = _normalize_flow_type(data.get("flow_type")) or payload["flow_type"]
         payload["direction"] = _normalize_exchange_direction_value(data.get("direction")) or payload["direction"]
+        payload["io_kind"] = _normalize_io_kind_tag(data.get("io_kind")) or payload["io_kind"]
         payload["unit"] = str(data.get("unit") or payload["unit"] or "").strip() or payload["unit"]
         payload["compartment"] = _normalize_compartment_value(data.get("compartment")) or payload["compartment"]
 
@@ -4604,6 +5330,7 @@ def _build_placeholder_one_shot_query_payload(
         classification_hints=payload.get("classification_hints") if isinstance(payload.get("classification_hints"), list) else [],
         flow_type=payload.get("flow_type"),
         direction=payload.get("direction"),
+        io_kind=payload.get("io_kind"),
         unit=payload.get("unit"),
         compartment=payload.get("compartment"),
     )
@@ -4943,15 +5670,330 @@ def _fallback_data_treatment_principles(
     return notes[:5]
 
 
-def _normalize_quantitative_reference(value: Any, fallback_flow_name: str | None) -> str:
-    text = str(value).strip() if value is not None else ""
+_REFERENCE_UNIT_CANONICAL: dict[str, str] = {
+    "kg": "kg",
+    "g": "g",
+    "mg": "mg",
+    "t": "t",
+    "mj": "MJ",
+    "gj": "GJ",
+    "j": "J",
+    "kwh": "kWh",
+    "mwh": "MWh",
+    "m3": "m3",
+    "l": "L",
+    "liter": "L",
+    "litre": "L",
+    "ml": "mL",
+    "m2": "m2",
+    "m": "m",
+    "piece": "unit",
+    "pieces": "unit",
+    "pc": "unit",
+    "pcs": "unit",
+    "ea": "unit",
+    "unit": "unit",
+    "units": "unit",
+    "item": "unit",
+    "items": "unit",
+}
+
+_REFERENCE_DIMENSION_FALLBACK_UNITS: dict[str, str] = {
+    "mass": "kg",
+    "energy": "kWh",
+    "volume": "m3",
+    "area": "m2",
+    "length": "m",
+}
+
+
+def _canonical_reference_unit(value: str | None) -> str | None:
+    token = _normalize_unit_token(value)
+    if not token:
+        return None
+    if token in _REFERENCE_UNIT_CANONICAL:
+        return _REFERENCE_UNIT_CANONICAL[token]
+    return str(value).strip() if value is not None else None
+
+
+def _reference_output_fallback_unit(policy: dict[str, Any] | None = None) -> str:
+    cfg = (policy or {}).get("reference_output") if isinstance(policy, dict) else {}
+    fallback = str((cfg or {}).get("fallback_unit") or "").strip()
+    canonical = _canonical_reference_unit(fallback)
+    allow_count = bool((cfg or {}).get("allow_count_unit_fallback", True))
+    if canonical and (allow_count or not _is_count_style_unit(canonical)):
+        return canonical
+    preferred_dimensions = cfg.get("prefer_physical_dimensions") if isinstance(cfg, dict) else None
+    if isinstance(preferred_dimensions, list):
+        for item in preferred_dimensions:
+            dimension = str(item or "").strip().lower()
+            unit = _REFERENCE_DIMENSION_FALLBACK_UNITS.get(dimension)
+            if unit:
+                return unit
+    return "kg" if not allow_count else (canonical or "unit")
+
+
+def _lcia_unit_tokens(policy: dict[str, Any] | None = None) -> set[str]:
+    cfg = (policy or {}).get("lcia_tokens") if isinstance(policy, dict) else {}
+    values = cfg.get("unit_tokens") if isinstance(cfg, dict) else None
+    if not isinstance(values, list):
+        return set()
+    return {
+        _normalize_unit_token(str(item))
+        for item in values
+        if isinstance(item, (str, int, float)) and _normalize_unit_token(str(item))
+    }
+
+
+def _lcia_name_keywords(policy: dict[str, Any] | None = None) -> list[str]:
+    cfg = (policy or {}).get("lcia_tokens") if isinstance(policy, dict) else {}
+    values = cfg.get("name_keywords") if isinstance(cfg, dict) else None
+    if not isinstance(values, list):
+        return []
+    return [str(item).strip().lower() for item in values if str(item).strip()]
+
+
+def _lcia_flow_property_ids(policy: dict[str, Any] | None = None) -> set[str]:
+    values = (policy or {}).get("impact_flow_property_ids") if isinstance(policy, dict) else None
+    if not isinstance(values, list):
+        return set()
+    return {str(item).strip() for item in values if str(item).strip()}
+
+
+def _is_lcia_impact_flow_property(
+    flow_property_id: str | None,
+    *,
+    flow_property_name: str | None = None,
+    policy: dict[str, Any] | None = None,
+) -> bool:
+    token = str(flow_property_id or "").strip()
+    if token and token in _lcia_flow_property_ids(policy):
+        return True
+    return _is_lcia_impact_name(flow_property_name, policy)
+
+
+def _append_reference_validation_violation(
+    violations: list[dict[str, Any]],
+    *,
+    code: str,
+    message: str,
+    hold: bool = False,
+    details: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "code": str(code).strip() or "reference_output_violation",
+        "message": str(message).strip() or "Reference-output validation violation.",
+        "hold": bool(hold),
+    }
+    if isinstance(details, dict) and details:
+        payload["details"] = details
+    violations.append(payload)
+
+
+def validate_reference_output_decision(
+    *,
+    stage: str,
+    unit: str | None,
+    policy: dict[str, Any] | None,
+    registry: dict[str, FlowPropertyUnitRegistryEntry] | None = None,
+    flow_property_id: str | None = None,
+    flow_property_name: str | None = None,
+    exchange_name: str | None = None,
+    flow_name: str | None = None,
+    flow_type: str | None = None,
+    is_reference_flow: bool = False,
+    is_product_or_waste: bool | None = None,
+    confidence: float | None = None,
+    chain_conflict: bool = False,
+) -> dict[str, Any]:
+    policy_payload = policy if isinstance(policy, dict) else _load_reference_output_policy()
+    registry_map = registry if isinstance(registry, dict) else _load_flow_property_unit_registry()
+    entry = _flow_property_registry_entry(flow_property_id, registry=registry_map)
+    normalized_unit = _canonical_reference_unit(unit) or str(unit or "").strip() or None
+    normalized_unit_token = _normalize_unit_token(normalized_unit)
+    recommended_unit: str | None = None
+    violations: list[dict[str, Any]] = []
+
+    allowed_unit_tokens = set(entry.allowed_units) if entry else set()
+    if entry and entry.dimension == "items":
+        allowed_unit_tokens.update({"unit", "units", "item", "items", "item(s)", "dozen(s)", "piece", "pieces", "pc", "pcs", "ea"})
+    if entry and allowed_unit_tokens and normalized_unit_token and normalized_unit_token not in allowed_unit_tokens:
+        recommended_unit = _canonical_reference_unit(entry.reference_unit) or entry.reference_unit
+        _append_reference_validation_violation(
+            violations,
+            code="unit_group_mismatch",
+            message="Unit is not in the flow-property unit group; corrected to the unit-group reference unit when possible.",
+            hold=False,
+            details={
+                "stage": stage,
+                "unit": normalized_unit,
+                "flow_property_id": entry.flow_property_id,
+                "unit_group_id": entry.unit_group_id,
+                "unit_group_name": entry.unit_group_name,
+                "allowed_units": sorted(allowed_unit_tokens),
+                "recommended_unit": recommended_unit,
+            },
+        )
+
+    normalized_flow_type = _normalize_flow_type(flow_type)
+    target_is_product_or_waste = (
+        bool(is_product_or_waste)
+        if is_product_or_waste is not None
+        else bool(is_reference_flow or normalized_flow_type in {"product", "waste"})
+    )
+    target_name = str(exchange_name or flow_name or flow_property_name or "").strip()
+    resolved_property_name = str(flow_property_name or (entry.flow_property_name if entry else "")).strip() or None
+
+    if target_is_product_or_waste and _is_lcia_impact_flow_property(
+        flow_property_id,
+        flow_property_name=resolved_property_name,
+        policy=policy_payload,
+    ):
+        _append_reference_validation_violation(
+            violations,
+            code="lcia_on_product_waste_property",
+            message="Product/waste reference output cannot use LCIA impact flow properties.",
+            hold=False,
+            details={
+                "stage": stage,
+                "flow_property_id": str(flow_property_id or "").strip() or None,
+                "flow_property_name": resolved_property_name,
+            },
+        )
+        if entry and entry.reference_unit:
+            recommended_unit = _canonical_reference_unit(entry.reference_unit) or entry.reference_unit
+
+    if target_is_product_or_waste and _is_lcia_impact_unit(normalized_unit, policy_payload):
+        _append_reference_validation_violation(
+            violations,
+            code="lcia_on_product_waste_unit",
+            message="Product/waste reference output cannot use LCIA impact units.",
+            hold=False,
+            details={"stage": stage, "unit": normalized_unit},
+        )
+        if entry and entry.reference_unit:
+            recommended_unit = _canonical_reference_unit(entry.reference_unit) or entry.reference_unit
+        elif not recommended_unit:
+            recommended_unit = _reference_output_fallback_unit(policy_payload)
+
+    if target_is_product_or_waste and _is_lcia_impact_name(target_name, policy_payload):
+        _append_reference_validation_violation(
+            violations,
+            code="lcia_on_product_waste_name",
+            message="Product/waste reference output naming indicates LCIA impact semantics.",
+            hold=False,
+            details={"stage": stage, "name": target_name or None},
+        )
+
+    confidence_value = _coerce_confidence(confidence)
+    low_conf_threshold = float(
+        (((policy_payload.get("reference_output") if isinstance(policy_payload.get("reference_output"), dict) else {}) or {}).get("low_confidence_threshold") or 0.45)
+    )
+    low_confidence = confidence_value is not None and confidence_value < low_conf_threshold
+    if low_confidence:
+        _append_reference_validation_violation(
+            violations,
+            code="low_confidence_hold",
+            message="Reference-output decision confidence is below hold threshold.",
+            hold=True,
+            details={
+                "stage": stage,
+                "confidence": confidence_value,
+                "low_confidence_threshold": low_conf_threshold,
+            },
+        )
+
+    if chain_conflict:
+        _append_reference_validation_violation(
+            violations,
+            code="chain_conflict_hold",
+            message="Severe chain conflict detected for reference-output decision.",
+            hold=True,
+            details={"stage": stage},
+        )
+
+    return {
+        "stage": stage,
+        "unit": normalized_unit,
+        "recommended_unit": recommended_unit,
+        "flow_property_id": entry.flow_property_id if entry else (str(flow_property_id or "").strip() or None),
+        "flow_property_name": entry.flow_property_name if entry else resolved_property_name,
+        "unit_group_id": entry.unit_group_id if entry else None,
+        "unit_group_name": entry.unit_group_name if entry else None,
+        "allowed_units": sorted(allowed_unit_tokens) if entry else [],
+        "dimension": entry.dimension if entry else None,
+        "violations": violations,
+        "hold": any(bool(item.get("hold")) for item in violations),
+        "low_confidence": low_confidence,
+    }
+
+
+def _is_lcia_impact_unit(unit: str | None, policy: dict[str, Any] | None = None) -> bool:
+    token = _normalize_unit_token(unit)
+    if not token:
+        return False
+    for blocked in _lcia_unit_tokens(policy):
+        if token == blocked or token.startswith(blocked):
+            return True
+    return False
+
+
+def _is_lcia_impact_name(name: str | None, policy: dict[str, Any] | None = None) -> bool:
+    text = str(name or "").strip().lower()
     if not text:
-        fallback = fallback_flow_name or "reference flow"
-        return f"1 unit of {fallback}"
+        return False
+    return any(keyword in text for keyword in _lcia_name_keywords(policy))
+
+
+def _is_count_style_unit(unit: str | None) -> bool:
+    token = _normalize_unit_token(unit)
+    return token in {"unit", "units", "item", "items", "item(s)", "dozen(s)", "piece", "pieces", "pc", "pcs", "ea", "count", "set", "batch"}
+
+
+def _is_physical_reference_unit(unit: str | None) -> bool:
+    dimension = _unit_dimension_from_unit(unit)
+    return dimension in {"mass", "energy", "volume", "area", "length"}
+
+
+def _normalize_reference_amount(value: float | None) -> str:
+    if value is None:
+        return "1"
+    if value <= 0:
+        return "1"
+    return _format_amount_value(value)
+
+
+def _format_quantitative_reference(*, amount: float | None, unit: str | None, flow_name: str | None) -> str:
+    flow = str(flow_name or "").strip() or "reference flow"
+    normalized_unit = _canonical_reference_unit(unit) or "unit"
+    amount_text = _normalize_reference_amount(amount)
+    return f"{amount_text} {normalized_unit} of {flow}"
+
+
+def _normalize_quantitative_reference(
+    value: Any,
+    fallback_flow_name: str | None,
+    *,
+    preferred_unit: str | None = None,
+    preferred_amount: float | None = None,
+    policy: dict[str, Any] | None = None,
+) -> str:
+    text = str(value).strip() if value is not None else ""
+    fallback = str(fallback_flow_name or "").strip() or "reference flow"
+    fallback_unit = _canonical_reference_unit(preferred_unit) or _reference_output_fallback_unit(policy)
+    if not text:
+        return _format_quantitative_reference(amount=preferred_amount or 1.0, unit=fallback_unit, flow_name=fallback)
+    amount, unit, flow = _parse_quantitative_reference(text)
+    if amount is not None and unit:
+        canonical_unit = _canonical_reference_unit(unit)
+        if canonical_unit and not _is_lcia_impact_unit(canonical_unit, policy):
+            return _format_quantitative_reference(amount=amount, unit=canonical_unit, flow_name=flow or fallback)
     if any(ch.isdigit() for ch in text):
+        # Keep the original string when it is already numeric but parser failed.
         return text
-    fallback = fallback_flow_name or text
-    return f"1 unit of {fallback}"
+    inferred_flow = flow or fallback
+    inferred_unit = _canonical_reference_unit(unit) or fallback_unit
+    return _format_quantitative_reference(amount=preferred_amount or 1.0, unit=inferred_unit, flow_name=inferred_flow)
 
 
 def _strip_flow_label(value: str) -> str:
@@ -4994,6 +6036,18 @@ def _normalize_material_role(value: Any) -> str | None:
         return None
     normalized = _MATERIAL_ROLE_ALIASES.get(text, text)
     if normalized in _MATERIAL_ROLES:
+        return normalized
+    return None
+
+
+def _normalize_io_kind_tag(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    normalized = _IO_KIND_TAG_ALIASES.get(text, text)
+    if normalized in _IO_KIND_TAG_VALUES:
         return normalized
     return None
 
@@ -5473,10 +6527,7 @@ def _apply_balance_auto_revisions(
                     continue
                 material_role = _normalize_material_role(exchange.get("material_role") or exchange.get("materialRole"))
                 balance_exclude = _normalize_balance_exclude(exchange.get("balance_exclude") or exchange.get("balanceExclude"))
-                comment_tags = _parse_exchange_comment_tags(exchange.get("generalComment"))
-                flow_kind = _normalize_flow_type(comment_tags.get(_EXCHANGE_KIND_TAG_NAME))
-                if not flow_kind:
-                    flow_kind = _exchange_flow_type_for_dedupe(exchange, direction=direction)
+                flow_kind = _exchange_flow_type_for_dedupe(exchange, direction=direction)
                 if not _is_core_mass_exchange(
                     material_role=material_role,
                     flow_kind=flow_kind,
@@ -5620,6 +6671,473 @@ def _apply_balance_auto_revisions(
     return revised_matches, revised_datasets, summary
 
 
+def _reference_unit_from_flow_dataset(flow_dataset: dict[str, Any] | None) -> str | None:
+    info = _flow_reference_info_from_dataset(flow_dataset)
+    if not info or not info.unit_group:
+        return None
+    return _canonical_reference_unit(info.unit_group.reference_unit)
+
+
+def _flow_property_id_from_flow_dataset(flow_dataset: dict[str, Any] | None) -> str | None:
+    info = _flow_reference_info_from_dataset(flow_dataset)
+    if not info:
+        return None
+    token = str(info.flow_property_id or "").strip()
+    return token or None
+
+
+def _reference_output_overrides(policy: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(policy, dict):
+        return []
+    overrides = policy.get("reference_unit_overrides")
+    if not isinstance(overrides, list):
+        return []
+    return [item for item in overrides if isinstance(item, dict)]
+
+
+def _match_reference_output_override(
+    *,
+    process_name: str,
+    reference_flow_name: str,
+    policy: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    process_label = process_name.strip().lower()
+    flow_label = reference_flow_name.strip().lower()
+    for item in _reference_output_overrides(policy):
+        process_pattern = str(item.get("process_name_pattern") or "").strip().lower()
+        flow_pattern = str(item.get("flow_name_pattern") or "").strip().lower()
+        if process_pattern and process_pattern not in process_label:
+            continue
+        if flow_pattern and flow_pattern not in flow_label:
+            continue
+        unit = _canonical_reference_unit(str(item.get("unit") or "").strip())
+        if not unit:
+            continue
+        return {
+            "unit": unit,
+            "source_tier": "case_override",
+            "confidence": 1.0,
+            "reason": str(item.get("reason") or "Matched reference_unit_overrides rule.").strip(),
+            "assumptions": str(item.get("assumptions") or "").strip() or None,
+            "evidence": [str(item.get("source") or "").strip()] if str(item.get("source") or "").strip() else [],
+        }
+    return None
+
+
+def _heuristic_reference_output_unit(
+    *,
+    reference_flow_name: str,
+    process_name: str,
+    operation: str,
+) -> str | None:
+    text = " ".join([reference_flow_name, process_name, operation]).lower()
+    if any(token in text for token in ("electricity", "power", "电力")):
+        return "kWh"
+    if any(token in text for token in ("steam", "heat", "thermal", "energy", "蒸汽", "热")):
+        return "MJ"
+    if any(token in text for token in ("area", "surface", "land", "平方米", "m2")):
+        return "m2"
+    if any(token in text for token in ("volume", "wastewater", "water", "liquid", "体积", "废水", "m3")):
+        return "m3"
+    if any(token in text for token in ("length", "distance", "meter", "米")):
+        return "m"
+    if any(token in text for token in ("ore", "metal", "material", "powder", "sludge", "waste", "product", "feedstock", "原料", "产品", "废物")):
+        return "kg"
+    return None
+
+
+def _reference_output_llm_evidence_snippet(scientific_references: dict[str, Any] | None, *, max_records: int = 3) -> list[dict[str, str]]:
+    if not isinstance(scientific_references, dict):
+        return []
+    records: list[dict[str, Any]] = []
+    for key in ("step2", REFERENCE_FULLTEXT_KEY, REFERENCE_SEARCH_KEY):
+        block = scientific_references.get(key)
+        refs = block.get("references") if isinstance(block, dict) else None
+        if isinstance(refs, list):
+            records = refs
+            if records:
+                break
+    snippets: list[dict[str, str]] = []
+    for item in records[:max_records]:
+        if not isinstance(item, dict):
+            continue
+        doi = _extract_reference_doi(item) or ""
+        source = str(item.get("source") or "").strip()
+        content = str(item.get("content") or item.get("text") or "").strip()
+        entry = {
+            "doi": doi,
+            "source": _compact_text(source, limit=180) if source else "",
+            "content": _compact_text(content, limit=260) if content else "",
+        }
+        if entry["doi"] or entry["source"] or entry["content"]:
+            snippets.append(entry)
+    return snippets
+
+
+def _batch_decide_reference_output_units_with_llm(
+    *,
+    llm: LanguageModelProtocol | None,
+    flow_summary: dict[str, Any],
+    operation: str,
+    processes: list[dict[str, Any]],
+    scientific_references: dict[str, Any] | None,
+    policy: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if llm is None:
+        return {}
+    cfg = (policy or {}).get("reference_output") if isinstance(policy, dict) else {}
+    if isinstance(cfg, dict) and cfg.get("llm_enabled") is False:
+        return {}
+    payload = {
+        "prompt": REFERENCE_OUTPUT_UNIT_PROMPT,
+        "context": {
+            "flow": flow_summary,
+            "operation": operation,
+            "processes": [
+                {
+                    "process_id": str(item.get("process_id") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                    "reference_flow_name": str(item.get("reference_flow_name") or "").strip(),
+                    "structure": item.get("structure") if isinstance(item.get("structure"), dict) else {},
+                }
+                for item in processes
+                if isinstance(item, dict)
+            ],
+            "reference_evidence": _reference_output_llm_evidence_snippet(scientific_references),
+            "policy": {
+                "prefer_physical_dimensions": (cfg.get("prefer_physical_dimensions") if isinstance(cfg, dict) else []) or [],
+                "fallback_unit": _reference_output_fallback_unit(policy),
+            },
+        },
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        raw = llm.invoke(payload)
+        data = _ensure_dict(raw)
+    except Exception as exc:  # pylint: disable=broad-except
+        LOGGER.warning("process_from_flow.reference_output_unit_llm_failed", error=str(exc))
+        return {}
+
+    decisions: dict[str, dict[str, Any]] = {}
+    rows = data.get("processes")
+    if not isinstance(rows, list):
+        return decisions
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        process_id = str(item.get("process_id") or item.get("processId") or "").strip()
+        unit = _canonical_reference_unit(str(item.get("unit") or "").strip())
+        if not process_id or not unit:
+            continue
+        decisions[process_id] = {
+            "unit": unit,
+            "source_tier": str(item.get("source_tier") or item.get("sourceTier") or "expert_judgement").strip() or "expert_judgement",
+            "confidence": _coerce_confidence(item.get("confidence")) or 0.0,
+            "reason": str(item.get("reason") or "").strip() or "LLM reference-output unit decision.",
+            "assumptions": str(item.get("assumptions") or "").strip() or None,
+            "evidence": _clean_evidence_list(item.get("evidence")),
+        }
+    return decisions
+
+
+def _prefer_reference_output_unit(
+    *,
+    process: dict[str, Any],
+    flow_dataset: dict[str, Any] | None,
+    operation: str,
+    llm_decisions: dict[str, dict[str, Any]],
+    policy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    process_id = str(process.get("process_id") or "").strip()
+    process_name = str(process.get("name") or "").strip()
+    reference_flow_name = str(process.get("reference_flow_name") or "").strip() or "reference flow"
+    is_reference_flow_process = bool(process.get("is_reference_flow_process"))
+    cfg = (policy or {}).get("reference_output") if isinstance(policy, dict) else {}
+    min_conf = float((cfg or {}).get("llm_min_confidence") or 0.55)
+    low_conf = float((cfg or {}).get("low_confidence_threshold") or 0.45)
+
+    override = _match_reference_output_override(
+        process_name=process_name,
+        reference_flow_name=reference_flow_name,
+        policy=policy,
+    )
+    if override:
+        return {
+            **override,
+            "process_id": process_id,
+            "low_confidence": False,
+        }
+
+    name_parts = process.get("name_parts") if isinstance(process.get("name_parts"), dict) else {}
+    qref = str(name_parts.get("quantitative_reference") or "").strip()
+    qref_amount, qref_unit, _qref_flow = _parse_quantitative_reference(qref)
+    canonical_qref_unit = _canonical_reference_unit(qref_unit)
+    if canonical_qref_unit and not _is_lcia_impact_unit(canonical_qref_unit, policy) and not _is_count_style_unit(canonical_qref_unit):
+        return {
+            "process_id": process_id,
+            "unit": canonical_qref_unit,
+            "amount": qref_amount if qref_amount is not None else 1.0,
+            "source_tier": "process_split_quantitative_reference",
+            "confidence": 0.9,
+            "reason": "Using quantitative_reference unit from process split output.",
+            "assumptions": None,
+            "evidence": [],
+            "low_confidence": False,
+        }
+
+    if is_reference_flow_process:
+        target_unit = _reference_unit_from_flow_dataset(flow_dataset)
+        if target_unit and not _is_lcia_impact_unit(target_unit, policy):
+            return {
+                "process_id": process_id,
+                "unit": target_unit,
+                "amount": qref_amount if qref_amount is not None else 1.0,
+                "source_tier": "reference_flow_dataset",
+                "confidence": 0.95,
+                "reason": "Using target reference flow dataset reference unit.",
+                "assumptions": None,
+                "evidence": [],
+                "low_confidence": False,
+            }
+
+    llm_decision = llm_decisions.get(process_id) if process_id else None
+    if isinstance(llm_decision, dict):
+        unit = _canonical_reference_unit(str(llm_decision.get("unit") or "").strip())
+        confidence = _coerce_confidence(llm_decision.get("confidence")) or 0.0
+        if unit and not _is_lcia_impact_unit(unit, policy):
+            use_llm = confidence >= min_conf or _is_physical_reference_unit(unit)
+            if use_llm:
+                return {
+                    "process_id": process_id,
+                    "unit": unit,
+                    "amount": qref_amount if qref_amount is not None else 1.0,
+                    "source_tier": str(llm_decision.get("source_tier") or "expert_judgement"),
+                    "confidence": confidence,
+                    "reason": str(llm_decision.get("reason") or "LLM selected reference-output unit."),
+                    "assumptions": llm_decision.get("assumptions"),
+                    "evidence": _clean_evidence_list(llm_decision.get("evidence")),
+                    "low_confidence": confidence < low_conf,
+                }
+
+    heuristic = _heuristic_reference_output_unit(
+        reference_flow_name=reference_flow_name,
+        process_name=process_name,
+        operation=operation,
+    )
+    if heuristic:
+        return {
+            "process_id": process_id,
+            "unit": heuristic,
+            "amount": qref_amount if qref_amount is not None else 1.0,
+            "source_tier": "industry_benchmark",
+            "confidence": 0.6,
+            "reason": "Heuristic industry benchmark from process/reference-flow semantics.",
+            "assumptions": "No direct numeric evidence for unit; benchmark heuristic applied.",
+            "evidence": [],
+            "low_confidence": False,
+        }
+
+    fallback_unit = _reference_output_fallback_unit(policy)
+    return {
+        "process_id": process_id,
+        "unit": fallback_unit,
+        "amount": qref_amount if qref_amount is not None else 1.0,
+        "source_tier": "expert_judgement",
+        "confidence": 0.2,
+        "reason": "No defensible physical unit identified; fallback unit applied.",
+        "assumptions": "Physical reference unit unresolved at split stage.",
+        "evidence": [],
+        "low_confidence": True,
+    }
+
+
+def _apply_reference_output_unit_policy(
+    *,
+    processes: list[dict[str, Any]],
+    flow_summary: dict[str, Any],
+    flow_dataset: dict[str, Any] | None,
+    operation: str,
+    llm: LanguageModelProtocol | None,
+    scientific_references: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    policy = _load_reference_output_policy()
+    registry = _load_flow_property_unit_registry()
+    target_flow_property_id = _flow_property_id_from_flow_dataset(flow_dataset)
+    llm_decisions = _batch_decide_reference_output_units_with_llm(
+        llm=llm,
+        flow_summary=flow_summary,
+        operation=operation,
+        processes=processes,
+        scientific_references=scientific_references,
+        policy=policy,
+    )
+    updated = copy.deepcopy(processes)
+    decisions: list[dict[str, Any]] = []
+    for proc in updated:
+        if not isinstance(proc, dict):
+            continue
+        name_parts = proc.get("name_parts") if isinstance(proc.get("name_parts"), dict) else {}
+        is_reference_flow_process = bool(proc.get("is_reference_flow_process"))
+        decision = _prefer_reference_output_unit(
+            process=proc,
+            flow_dataset=flow_dataset,
+            operation=operation,
+            llm_decisions=llm_decisions,
+            policy=policy,
+        )
+        reference_flow_name = str(proc.get("reference_flow_name") or "").strip() or "reference flow"
+        reference_flow_property_id = target_flow_property_id if is_reference_flow_process else None
+        validation = validate_reference_output_decision(
+            stage="step2_reference_output",
+            unit=decision.get("unit"),
+            policy=policy,
+            registry=registry,
+            flow_property_id=reference_flow_property_id,
+            flow_name=reference_flow_name,
+            is_reference_flow=True,
+            is_product_or_waste=True,
+            confidence=_coerce_confidence(decision.get("confidence")),
+        )
+        recommended_unit = _canonical_reference_unit(str(validation.get("recommended_unit") or "").strip())
+        if recommended_unit:
+            decision["unit"] = recommended_unit
+        decision_low_confidence = bool(decision.get("low_confidence")) or bool(validation.get("low_confidence"))
+        hold_codes = [
+            str(item.get("code") or "").strip()
+            for item in (validation.get("violations") if isinstance(validation.get("violations"), list) else [])
+            if isinstance(item, dict) and bool(item.get("hold"))
+        ]
+        decision["low_confidence"] = decision_low_confidence
+        decision["hold"] = bool(validation.get("hold"))
+        decision["hold_codes"] = [code for code in hold_codes if code]
+        decision["validation_violations"] = [
+            item for item in (validation.get("violations") if isinstance(validation.get("violations"), list) else []) if isinstance(item, dict)
+        ]
+        quant_ref = _normalize_quantitative_reference(
+            name_parts.get("quantitative_reference"),
+            reference_flow_name,
+            preferred_unit=decision.get("unit"),
+            preferred_amount=_parse_amount_value(decision.get("amount")),
+            policy=policy,
+        )
+        name_parts["quantitative_reference"] = quant_ref
+        proc["name_parts"] = name_parts
+        base_name = str(name_parts.get("base_name") or proc.get("name") or "").strip() or reference_flow_name
+        treatment_and_route = str(name_parts.get("treatment_and_route") or "Unspecified route").strip()
+        mix_and_location = str(name_parts.get("mix_and_location") or flow_summary.get("mix_en") or "Unspecified mix/location").strip()
+        proc["name"] = " | ".join([base_name, treatment_and_route, mix_and_location, quant_ref])
+        proc["reference_output_basis"] = {
+            "unit": decision.get("unit"),
+            "source_tier": decision.get("source_tier"),
+            "confidence": round(float(decision.get("confidence") or 0.0), 4),
+            "reason": decision.get("reason"),
+            "assumptions": decision.get("assumptions"),
+            "evidence": _clean_evidence_list(decision.get("evidence")),
+            "low_confidence": decision_low_confidence,
+            "hold": bool(decision.get("hold")),
+            "hold_codes": decision.get("hold_codes") if isinstance(decision.get("hold_codes"), list) else [],
+            "flow_property_id": reference_flow_property_id,
+            "unit_group_id": validation.get("unit_group_id"),
+            "unit_group_name": validation.get("unit_group_name"),
+            "dimension": validation.get("dimension"),
+            "validation_violations": decision.get("validation_violations"),
+        }
+        decisions.append(
+            {
+                "process_id": str(proc.get("process_id") or "").strip() or None,
+                "process_name": str(proc.get("name") or "").strip() or None,
+                "reference_flow_name": reference_flow_name,
+                "quantitative_reference": quant_ref,
+                **proc["reference_output_basis"],
+            }
+        )
+
+    fallback_unit = _reference_output_fallback_unit(policy)
+    low_confidence = [item for item in decisions if bool(item.get("low_confidence"))]
+    held_processes = [item for item in decisions if bool(item.get("hold"))]
+    fallback_count = sum(1 for item in decisions if _canonical_reference_unit(str(item.get("unit") or "")) == fallback_unit)
+    physical_count = sum(1 for item in decisions if _is_physical_reference_unit(str(item.get("unit") or "")))
+    summary = {
+        "policy_path": str(_REFERENCE_OUTPUT_POLICY_PATH),
+        "decision_total": len(decisions),
+        "physical_unit_count": physical_count,
+        "fallback_unit_count": fallback_count,
+        "low_confidence_count": len(low_confidence),
+        "hold_count": len(held_processes),
+        "low_confidence_processes": [
+            {
+                "process_id": item.get("process_id"),
+                "unit": item.get("unit"),
+                "source_tier": item.get("source_tier"),
+                "confidence": item.get("confidence"),
+                "reason": item.get("reason"),
+                "hold_codes": item.get("hold_codes"),
+            }
+            for item in low_confidence
+        ],
+        "held_processes": [
+            {
+                "process_id": item.get("process_id"),
+                "unit": item.get("unit"),
+                "confidence": item.get("confidence"),
+                "reason": item.get("reason"),
+                "hold_codes": item.get("hold_codes"),
+            }
+            for item in held_processes
+        ],
+        "decisions": decisions,
+    }
+    return updated, summary
+
+
+def _reference_basis_from_process_plan(
+    *,
+    process_plan: dict[str, Any] | None,
+    fallback_flow_dataset: dict[str, Any] | None,
+    is_reference_flow_process: bool,
+    policy: dict[str, Any] | None,
+    flow_property_id: str | None = None,
+    registry: dict[str, FlowPropertyUnitRegistryEntry] | None = None,
+) -> tuple[str, str]:
+    name_parts = process_plan.get("name_parts") if isinstance((process_plan or {}).get("name_parts"), dict) else {}
+    basis = process_plan.get("reference_output_basis") if isinstance((process_plan or {}).get("reference_output_basis"), dict) else {}
+    qref = str(name_parts.get("quantitative_reference") or "").strip()
+    q_amount, q_unit, q_flow = _parse_quantitative_reference(qref)
+    unit = _canonical_reference_unit(str(basis.get("unit") or "").strip()) or _canonical_reference_unit(q_unit)
+    amount_text = _normalize_reference_amount(q_amount)
+    effective_flow_property_id = str(flow_property_id or "").strip() or None
+    if not effective_flow_property_id and is_reference_flow_process:
+        effective_flow_property_id = _flow_property_id_from_flow_dataset(fallback_flow_dataset)
+    validation = validate_reference_output_decision(
+        stage="reference_basis",
+        unit=unit,
+        policy=policy,
+        registry=registry,
+        flow_property_id=effective_flow_property_id,
+        flow_name=q_flow,
+        is_reference_flow=True,
+        is_product_or_waste=True,
+        confidence=_coerce_confidence(basis.get("confidence")),
+    )
+    recommended = _canonical_reference_unit(str(validation.get("recommended_unit") or "").strip())
+    if recommended:
+        unit = recommended
+    if (not unit or _is_count_style_unit(unit) or _is_lcia_impact_unit(unit, policy)) and is_reference_flow_process:
+        unit = _reference_unit_from_flow_dataset(fallback_flow_dataset)
+    if not unit or _is_lcia_impact_unit(unit, policy):
+        unit = _reference_output_fallback_unit(policy)
+    return amount_text, unit
+
+
+def _append_reference_rule_comment(comment: str | None, message: str) -> str:
+    prefix = str(comment or "").strip()
+    if not prefix:
+        return message
+    if message in prefix:
+        return prefix
+    return f"{prefix} {message}".strip()
+
+
 def _normalize_route_processes(
     processes: list[dict[str, Any]],
     *,
@@ -5660,7 +7178,13 @@ def _normalize_route_processes(
         if not treatment_and_route:
             treatment_and_route = "Unspecified route"
         mix_and_location = str(name_parts.get("mix_and_location") or flow_summary.get("mix_en") or "Unspecified mix/location").strip()
-        quantitative_reference = _normalize_quantitative_reference(name_parts.get("quantitative_reference"), reference_flow_name)
+        basis = proc.get("reference_output_basis") if isinstance(proc.get("reference_output_basis"), dict) else {}
+        quantitative_reference = _normalize_quantitative_reference(
+            name_parts.get("quantitative_reference"),
+            reference_flow_name,
+            preferred_unit=str(basis.get("unit") or "").strip() or None,
+            policy=_load_reference_output_policy(),
+        )
 
         name_parts = {
             "base_name": base_name,
@@ -5736,6 +7260,532 @@ def _normalize_route_processes(
         }
 
     return normalized
+
+
+def _normalize_chain_flow_name(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    text = re.sub(r"^f\d+\s*[:\-]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def _build_chain_contract(processes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    ordered = [item for item in (processes or []) if isinstance(item, dict)]
+    contract: list[dict[str, Any]] = []
+    for idx in range(len(ordered) - 1):
+        current = ordered[idx]
+        nxt = ordered[idx + 1]
+        from_pid = str(current.get("process_id") or "").strip()
+        to_pid = str(nxt.get("process_id") or "").strip()
+        reference_flow_name = str(current.get("reference_flow_name") or "").strip()
+        if not from_pid or not to_pid or not reference_flow_name:
+            continue
+        next_structure = nxt.get("structure") if isinstance(nxt.get("structure"), dict) else {}
+        expected_inputs = [
+            _strip_flow_label(value)
+            for value in _clean_string_list(next_structure.get("inputs"))
+            if _strip_flow_label(value).strip()
+        ]
+        contract.append(
+            {
+                "chain_link_id": f"chain_{idx + 1}_{from_pid}_{to_pid}",
+                "from_pid": from_pid,
+                "to_pid": to_pid,
+                "reference_flow_name": reference_flow_name,
+                "expected_next_inputs": expected_inputs,
+            }
+        )
+    return contract
+
+
+def _collect_process_input_names(process_exchanges: list[dict[str, Any]] | None) -> dict[str, set[str]]:
+    index: dict[str, set[str]] = {}
+    for proc in process_exchanges or []:
+        if not isinstance(proc, dict):
+            continue
+        process_id = str(proc.get("process_id") or "").strip()
+        if not process_id:
+            continue
+        inputs = index.setdefault(process_id, set())
+        exchanges = proc.get("exchanges") if isinstance(proc.get("exchanges"), list) else []
+        for exchange in exchanges:
+            if not isinstance(exchange, dict):
+                continue
+            direction = str(exchange.get("exchangeDirection") or "").strip().lower()
+            if direction != "input":
+                continue
+            name = _normalize_chain_flow_name(str(exchange.get("exchangeName") or ""))
+            if name:
+                inputs.add(name)
+    return index
+
+
+def _run_chain_preflight(
+    *,
+    chain_contract: list[dict[str, Any]] | None,
+    process_exchanges: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    contract = [item for item in (chain_contract or []) if isinstance(item, dict)]
+    process_inputs = _collect_process_input_names(process_exchanges)
+    errors: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    for item in contract:
+        from_pid = str(item.get("from_pid") or "").strip()
+        to_pid = str(item.get("to_pid") or "").strip()
+        ref_name = str(item.get("reference_flow_name") or "").strip()
+        ref_key = _normalize_chain_flow_name(ref_name)
+        next_inputs = process_inputs.get(to_pid, set())
+        passed = bool(ref_key and ref_key in next_inputs)
+        checks.append(
+            {
+                "from_pid": from_pid,
+                "to_pid": to_pid,
+                "reference_flow_name": ref_name,
+                "status": "ok" if passed else "missing",
+            }
+        )
+        if passed:
+            continue
+        errors.append(
+            {
+                "code": "missing_main_input_link",
+                "from_pid": from_pid,
+                "to_pid": to_pid,
+                "reference_flow_name": ref_name,
+            }
+        )
+    return {
+        "status": "failed" if errors else "passed",
+        "checks": checks,
+        "errors": errors,
+        "checked_pairs": len(checks),
+    }
+
+
+def _process_exchanges_by_id(process_exchanges: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    mapping: dict[str, dict[str, Any]] = {}
+    for proc in process_exchanges or []:
+        if not isinstance(proc, dict):
+            continue
+        process_id = str(proc.get("process_id") or proc.get("processId") or "").strip()
+        if not process_id:
+            continue
+        mapping[process_id] = proc
+    return mapping
+
+
+def _exchange_direction_text(exchange: dict[str, Any]) -> str:
+    direction = str(exchange.get("exchangeDirection") or "").strip()
+    return direction if direction in {"Input", "Output"} else "Input"
+
+
+def _chain_candidate_exchanges(
+    proc_entry: dict[str, Any] | None,
+    *,
+    direction: str | None = None,
+) -> list[dict[str, Any]]:
+    exchanges = proc_entry.get("exchanges") if isinstance(proc_entry, dict) and isinstance(proc_entry.get("exchanges"), list) else []
+    if direction is None:
+        return [item for item in exchanges if isinstance(item, dict)]
+    return [item for item in exchanges if isinstance(item, dict) and _exchange_direction_text(item) == direction]
+
+
+def _find_upstream_chain_exchange(
+    *,
+    proc_entry: dict[str, Any] | None,
+    contract: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(proc_entry, dict):
+        return None
+    chain_link_id = str(contract.get("chain_link_id") or "").strip()
+    ref_name = str(contract.get("reference_flow_name") or "").strip()
+    exchanges = _chain_candidate_exchanges(proc_entry)
+    if chain_link_id:
+        for exchange in exchanges:
+            if str(exchange.get("chain_link_id") or "").strip() != chain_link_id:
+                continue
+            role = str(exchange.get("chain_link_role") or "").strip()
+            if role in {"upstream_reference_output", "upstream_reference_flow"}:
+                return exchange
+    candidates = [item for item in exchanges if bool(item.get("is_reference_flow"))]
+    if ref_name:
+        exact = [item for item in candidates if _flow_name_matches(str(item.get("exchangeName") or "").strip(), ref_name)]
+        if exact:
+            candidates = exact
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    return max(candidates, key=_score_product_exchange)
+
+
+def _find_downstream_chain_exchange(
+    *,
+    proc_entry: dict[str, Any] | None,
+    contract: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(proc_entry, dict):
+        return None
+    chain_link_id = str(contract.get("chain_link_id") or "").strip()
+    ref_name = str(contract.get("reference_flow_name") or "").strip()
+    inputs = _chain_candidate_exchanges(proc_entry, direction="Input")
+    if chain_link_id:
+        for exchange in inputs:
+            if str(exchange.get("chain_link_id") or "").strip() != chain_link_id:
+                continue
+            role = str(exchange.get("chain_link_role") or "").strip()
+            if role in {"downstream_main_input", "downstream_chain_input"}:
+                return exchange
+    if ref_name:
+        exact = [item for item in inputs if _flow_name_matches(str(item.get("exchangeName") or "").strip(), ref_name)]
+        if exact:
+            if len(exact) == 1:
+                return exact[0]
+            return max(exact, key=_score_product_exchange)
+    return None
+
+
+def _annotate_chain_link_exchange(
+    exchange: dict[str, Any],
+    *,
+    contract: dict[str, Any],
+    role: str,
+) -> None:
+    chain_link_id = str(contract.get("chain_link_id") or "").strip()
+    if chain_link_id:
+        exchange["chain_link_id"] = chain_link_id
+    exchange["chain_link_role"] = role
+    exchange["chain_link_from_pid"] = str(contract.get("from_pid") or "").strip() or None
+    exchange["chain_link_to_pid"] = str(contract.get("to_pid") or "").strip() or None
+    exchange["chain_link_flow_name"] = str(contract.get("reference_flow_name") or "").strip() or None
+
+
+def _derive_injected_chain_input_types(upstream_exchange: dict[str, Any] | None) -> tuple[str, str]:
+    upstream_flow_type = _normalize_flow_type((upstream_exchange or {}).get("flow_type") or (upstream_exchange or {}).get("flowType"))
+    if upstream_flow_type == "waste":
+        return "waste", "waste"
+    if upstream_flow_type == "service":
+        return "service", "service"
+    if upstream_flow_type == "elementary":
+        return "elementary", "resource"
+    return "product", "raw_material"
+
+
+def _inject_missing_downstream_chain_input(
+    *,
+    proc_entry: dict[str, Any],
+    contract: dict[str, Any],
+    upstream_exchange: dict[str, Any] | None,
+) -> dict[str, Any]:
+    exchanges = proc_entry.get("exchanges") if isinstance(proc_entry.get("exchanges"), list) else []
+    unit = str((upstream_exchange or {}).get("unit") or "").strip() or "unit"
+    flow_type, io_kind_tag = _derive_injected_chain_input_types(upstream_exchange)
+    from_pid = str(contract.get("from_pid") or "").strip()
+    to_pid = str(contract.get("to_pid") or "").strip()
+    note = f"Auto-injected chain continuity input ({from_pid} -> {to_pid})."
+    injected: dict[str, Any] = {
+        "exchangeDirection": "Input",
+        "exchangeName": str(contract.get("reference_flow_name") or "").strip() or "intermediate product",
+        "generalComment": note,
+        "unit": unit,
+        "amount": None,
+        "is_reference_flow": False,
+        "flow_type": flow_type,
+        "io_kind_tag": io_kind_tag,
+        "is_chain_link_injected": True,
+        "data_source": {"source_type": "expert_judgement"},
+        "evidence": [note],
+    }
+    if io_kind_tag == "raw_material":
+        injected["material_role"] = "raw_material"
+    _annotate_chain_link_exchange(injected, contract=contract, role="downstream_main_input")
+    _ensure_exchange_comment_tags(injected)
+    exchanges.insert(0, injected)
+    proc_entry["exchanges"] = exchanges
+    return injected
+
+
+def _enforce_chain_input_links(
+    *,
+    chain_contract: list[dict[str, Any]] | None,
+    process_exchanges: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    updated = copy.deepcopy(process_exchanges) if isinstance(process_exchanges, list) else []
+    proc_by_id = _process_exchanges_by_id(updated)
+    summary: dict[str, Any] = {
+        "checked_pairs": 0,
+        "annotated_upstream": 0,
+        "annotated_downstream": 0,
+        "injected_downstream_inputs": 0,
+        "issues": [],
+        "changes": [],
+    }
+    for contract in [item for item in (chain_contract or []) if isinstance(item, dict)]:
+        summary["checked_pairs"] += 1
+        from_pid = str(contract.get("from_pid") or "").strip()
+        to_pid = str(contract.get("to_pid") or "").strip()
+        ref_name = str(contract.get("reference_flow_name") or "").strip()
+        chain_link_id = str(contract.get("chain_link_id") or "").strip() or None
+        upstream_proc = proc_by_id.get(from_pid)
+        downstream_proc = proc_by_id.get(to_pid)
+        if upstream_proc is None or downstream_proc is None:
+            summary["issues"].append(
+                {
+                    "code": "missing_process_for_chain_link",
+                    "chain_link_id": chain_link_id,
+                    "from_pid": from_pid,
+                    "to_pid": to_pid,
+                    "reference_flow_name": ref_name,
+                }
+            )
+            continue
+        upstream_exchange = _find_upstream_chain_exchange(proc_entry=upstream_proc, contract=contract)
+        if upstream_exchange is None:
+            summary["issues"].append(
+                {
+                    "code": "missing_upstream_reference_exchange",
+                    "chain_link_id": chain_link_id,
+                    "from_pid": from_pid,
+                    "to_pid": to_pid,
+                    "reference_flow_name": ref_name,
+                }
+            )
+        else:
+            had = bool(str(upstream_exchange.get("chain_link_id") or "").strip())
+            _annotate_chain_link_exchange(upstream_exchange, contract=contract, role="upstream_reference_output")
+            if not had:
+                summary["annotated_upstream"] += 1
+
+        downstream_exchange = _find_downstream_chain_exchange(proc_entry=downstream_proc, contract=contract)
+        if downstream_exchange is None:
+            _inject_missing_downstream_chain_input(
+                proc_entry=downstream_proc,
+                contract=contract,
+                upstream_exchange=upstream_exchange,
+            )
+            summary["injected_downstream_inputs"] += 1
+            summary["changes"].append(
+                {
+                    "action": "inject_downstream_main_input",
+                    "chain_link_id": chain_link_id,
+                    "from_pid": from_pid,
+                    "to_pid": to_pid,
+                    "reference_flow_name": ref_name,
+                }
+            )
+        else:
+            had = bool(str(downstream_exchange.get("chain_link_id") or "").strip())
+            _annotate_chain_link_exchange(downstream_exchange, contract=contract, role="downstream_main_input")
+            if not had:
+                summary["annotated_downstream"] += 1
+    summary["status"] = "ok" if not summary["issues"] else "check"
+    return updated, summary
+
+
+def _exchange_selected_uuid(exchange: dict[str, Any]) -> str | None:
+    flow_search = exchange.get("flow_search") if isinstance(exchange.get("flow_search"), dict) else {}
+    value = str(flow_search.get("selected_uuid") or "").strip()
+    return value or None
+
+
+def _exchange_candidate_records_for_chain_uuid_sync(exchange: dict[str, Any]) -> list[dict[str, Any]]:
+    flow_search = exchange.get("flow_search") if isinstance(exchange.get("flow_search"), dict) else {}
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in ("candidates", "resolution_raw_candidates", "resolution_candidates"):
+        records = flow_search.get(key)
+        if not isinstance(records, list):
+            continue
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            uuid_value = str(item.get("uuid") or "").strip()
+            if not uuid_value or uuid_value in seen:
+                continue
+            seen.add(uuid_value)
+            merged.append(item)
+    return merged
+
+
+def _exchange_candidates_contain_uuid(exchange: dict[str, Any], uuid_value: str | None) -> bool:
+    target = str(uuid_value or "").strip()
+    if not target:
+        return False
+    return any(str(item.get("uuid") or "").strip() == target for item in _exchange_candidate_records_for_chain_uuid_sync(exchange))
+
+
+def _exchange_candidate_version_for_uuid(exchange: dict[str, Any], uuid_value: str | None) -> str | None:
+    target = str(uuid_value or "").strip()
+    if not target:
+        return None
+    for item in _exchange_candidate_records_for_chain_uuid_sync(exchange):
+        if str(item.get("uuid") or "").strip() != target:
+            continue
+        version = str(item.get("version") or "").strip()
+        if version:
+            return version
+    return None
+
+
+def _set_exchange_selected_uuid_for_chain(
+    exchange: dict[str, Any],
+    *,
+    selected_uuid: str,
+    selected_version: str | None,
+    reason: str,
+    stage: str,
+) -> None:
+    flow_search = exchange.get("flow_search") if isinstance(exchange.get("flow_search"), dict) else {}
+    flow_search["selected_uuid"] = selected_uuid
+    if selected_version:
+        flow_search["selected_version"] = selected_version
+    flow_search["selected_reason"] = reason
+    flow_search["chain_uuid_sync"] = {
+        "stage": stage,
+        "selected_uuid": selected_uuid,
+        "selected_version": selected_version,
+        "reason": reason,
+    }
+    exchange["flow_search"] = flow_search
+
+
+def _sync_chain_link_uuids(
+    *,
+    chain_contract: list[dict[str, Any]] | None,
+    process_exchanges: list[dict[str, Any]] | None,
+    apply_repairs: bool,
+    stage: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    updated = copy.deepcopy(process_exchanges) if (apply_repairs and isinstance(process_exchanges, list)) else [item for item in (process_exchanges or []) if isinstance(item, dict)]
+    proc_by_id = _process_exchanges_by_id(updated)
+    summary: dict[str, Any] = {
+        "stage": stage,
+        "status": "ok",
+        "apply_repairs": bool(apply_repairs),
+        "checked_pairs": 0,
+        "ok_pairs": 0,
+        "repaired_pairs": 0,
+        "mismatch_pairs": 0,
+        "missing_exchange_pairs": 0,
+        "missing_uuid_pairs": 0,
+        "issues": [],
+        "repairs": [],
+    }
+    for contract in [item for item in (chain_contract or []) if isinstance(item, dict)]:
+        summary["checked_pairs"] += 1
+        chain_link_id = str(contract.get("chain_link_id") or "").strip() or None
+        from_pid = str(contract.get("from_pid") or "").strip()
+        to_pid = str(contract.get("to_pid") or "").strip()
+        ref_name = str(contract.get("reference_flow_name") or "").strip()
+        upstream_exchange = _find_upstream_chain_exchange(proc_entry=proc_by_id.get(from_pid), contract=contract)
+        downstream_exchange = _find_downstream_chain_exchange(proc_entry=proc_by_id.get(to_pid), contract=contract)
+        if upstream_exchange is None or downstream_exchange is None:
+            summary["missing_exchange_pairs"] += 1
+            summary["issues"].append(
+                {
+                    "code": "chain_exchange_missing",
+                    "chain_link_id": chain_link_id,
+                    "from_pid": from_pid,
+                    "to_pid": to_pid,
+                    "reference_flow_name": ref_name,
+                    "upstream_missing": upstream_exchange is None,
+                    "downstream_missing": downstream_exchange is None,
+                }
+            )
+            continue
+
+        upstream_uuid = _exchange_selected_uuid(upstream_exchange)
+        downstream_uuid = _exchange_selected_uuid(downstream_exchange)
+        if upstream_uuid and downstream_uuid and upstream_uuid == downstream_uuid:
+            summary["ok_pairs"] += 1
+            continue
+
+        if not upstream_uuid and not downstream_uuid:
+            summary["missing_uuid_pairs"] += 1
+            summary["issues"].append(
+                {
+                    "code": "chain_uuid_missing_both",
+                    "chain_link_id": chain_link_id,
+                    "from_pid": from_pid,
+                    "to_pid": to_pid,
+                    "reference_flow_name": ref_name,
+                }
+            )
+            continue
+
+        repaired = False
+        if apply_repairs:
+            if upstream_uuid and (not downstream_uuid or downstream_uuid != upstream_uuid):
+                if _exchange_candidates_contain_uuid(downstream_exchange, upstream_uuid):
+                    version = _exchange_candidate_version_for_uuid(downstream_exchange, upstream_uuid)
+                    _set_exchange_selected_uuid_for_chain(
+                        downstream_exchange,
+                        selected_uuid=upstream_uuid,
+                        selected_version=version,
+                        reason=f"Synchronized chain UUID from upstream ({from_pid}->{to_pid}).",
+                        stage=stage,
+                    )
+                    summary["repaired_pairs"] += 1
+                    summary["repairs"].append(
+                        {
+                            "chain_link_id": chain_link_id,
+                            "from_pid": from_pid,
+                            "to_pid": to_pid,
+                            "direction": "upstream_to_downstream",
+                            "selected_uuid": upstream_uuid,
+                            "selected_version": version,
+                        }
+                    )
+                    repaired = True
+            elif downstream_uuid and not upstream_uuid:
+                if _exchange_candidates_contain_uuid(upstream_exchange, downstream_uuid):
+                    version = _exchange_candidate_version_for_uuid(upstream_exchange, downstream_uuid)
+                    _set_exchange_selected_uuid_for_chain(
+                        upstream_exchange,
+                        selected_uuid=downstream_uuid,
+                        selected_version=version,
+                        reason=f"Synchronized chain UUID from downstream ({from_pid}->{to_pid}).",
+                        stage=stage,
+                    )
+                    summary["repaired_pairs"] += 1
+                    summary["repairs"].append(
+                        {
+                            "chain_link_id": chain_link_id,
+                            "from_pid": from_pid,
+                            "to_pid": to_pid,
+                            "direction": "downstream_to_upstream",
+                            "selected_uuid": downstream_uuid,
+                            "selected_version": version,
+                        }
+                    )
+                    repaired = True
+        if repaired:
+            continue
+
+        summary["mismatch_pairs"] += 1
+        summary["issues"].append(
+            {
+                "code": "chain_uuid_mismatch" if (upstream_uuid and downstream_uuid) else "chain_uuid_partial_missing",
+                "chain_link_id": chain_link_id,
+                "from_pid": from_pid,
+                "to_pid": to_pid,
+                "reference_flow_name": ref_name,
+                "upstream_uuid": upstream_uuid,
+                "downstream_uuid": downstream_uuid,
+                "downstream_has_upstream_in_candidates": bool(upstream_uuid and _exchange_candidates_contain_uuid(downstream_exchange, upstream_uuid)),
+                "upstream_has_downstream_in_candidates": bool(downstream_uuid and _exchange_candidates_contain_uuid(upstream_exchange, downstream_uuid)),
+            }
+        )
+
+    if summary["missing_exchange_pairs"] or summary["mismatch_pairs"]:
+        summary["status"] = "check"
+    elif summary["missing_uuid_pairs"]:
+        summary["status"] = "insufficient"
+    return updated, summary
+
+
 
 
 def _build_langgraph(
@@ -6004,6 +8054,14 @@ def _build_langgraph(
                     flow_summary=state.get("flow_summary") or {},
                     route_name="Default route",
                 )
+                normalized, reference_output_summary = _apply_reference_output_unit_policy(
+                    processes=normalized,
+                    flow_summary=state.get("flow_summary") or {},
+                    flow_dataset=state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None,
+                    operation=str(state.get("operation") or "produce"),
+                    llm=llm,
+                    scientific_references=state.get("scientific_references") if isinstance(state.get("scientific_references"), dict) else None,
+                )
                 default_route = {
                     "route_id": "R1",
                     "route_name": "Default route",
@@ -6013,19 +8071,68 @@ def _build_langgraph(
                     "process_routes": [default_route],
                     "selected_route_id": "R1",
                     "processes": normalized,
+                    "chain_contract": _build_chain_contract(normalized),
+                    "reference_output_decision_summary": reference_output_summary,
                     "step_markers": _update_step_markers(state, "step2"),
                 }
-            return {"step_markers": _update_step_markers(state, "step2")}
+            updates: dict[str, Any] = {"step_markers": _update_step_markers(state, "step2")}
+            existing_processes = [item for item in (state.get("processes") or []) if isinstance(item, dict)]
+            has_reference_output_summary = isinstance(state.get("reference_output_decision_summary"), dict)
+            has_reference_output_basis = all(
+                isinstance(item.get("reference_output_basis"), dict) for item in existing_processes
+            ) if existing_processes else False
+            if existing_processes and (not has_reference_output_summary or not has_reference_output_basis):
+                updated_processes, reference_output_summary = _apply_reference_output_unit_policy(
+                    processes=existing_processes,
+                    flow_summary=state.get("flow_summary") or {},
+                    flow_dataset=state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None,
+                    operation=str(state.get("operation") or "produce"),
+                    llm=llm,
+                    scientific_references=state.get("scientific_references") if isinstance(state.get("scientific_references"), dict) else None,
+                )
+                updates["processes"] = updated_processes
+                updates["reference_output_decision_summary"] = reference_output_summary
+                existing_routes = state.get("process_routes")
+                selected_route_id = str(state.get("selected_route_id") or "").strip()
+                if isinstance(existing_routes, list) and existing_routes:
+                    synced_routes: list[dict[str, Any]] = []
+                    synced = False
+                    for route_idx, route in enumerate(existing_routes):
+                        if not isinstance(route, dict):
+                            continue
+                        route_copy = copy.deepcopy(route)
+                        route_id = str(route_copy.get("route_id") or route_copy.get("routeId") or "").strip()
+                        should_sync = False
+                        if selected_route_id:
+                            should_sync = route_id == selected_route_id
+                        elif not synced and route_idx == 0:
+                            should_sync = True
+                        if should_sync:
+                            route_copy["processes"] = copy.deepcopy(updated_processes)
+                            synced = True
+                        synced_routes.append(route_copy)
+                    if synced_routes:
+                        updates["process_routes"] = synced_routes
+                updates["chain_contract"] = _build_chain_contract(updated_processes)
+            elif not isinstance(state.get("chain_contract"), list):
+                updates["chain_contract"] = _build_chain_contract(state.get("processes"))
+            return updates
         if llm is None:
             summary = state.get("flow_summary") or {}
             flow_name = summary.get("base_name_en") or "reference flow"
             operation = str(state.get("operation") or "produce").strip().lower()
             prefix = "Treatment of" if operation in {"treat", "dispose", "disposal", "treatment"} else "Production of"
+            target_unit = _reference_unit_from_flow_dataset(state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None)
             name_parts = {
                 "base_name": f"{prefix} {flow_name}",
                 "treatment_and_route": "Generic route",
                 "mix_and_location": summary.get("mix_en") or "Unspecified mix/location",
-                "quantitative_reference": _normalize_quantitative_reference(None, flow_name),
+                "quantitative_reference": _normalize_quantitative_reference(
+                    None,
+                    flow_name,
+                    preferred_unit=target_unit,
+                    policy=_load_reference_output_policy(),
+                ),
             }
             process_entry = {
                 "process_id": "P1",
@@ -6044,10 +8151,21 @@ def _build_langgraph(
                 },
                 "exchange_keywords": {"inputs": [], "outputs": _dedupe_flows([flow_name])},
             }
+            processes, reference_output_summary = _apply_reference_output_unit_policy(
+                processes=[process_entry],
+                flow_summary=state.get("flow_summary") or {},
+                flow_dataset=state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None,
+                operation=operation,
+                llm=llm,
+                scientific_references=state.get("scientific_references") if isinstance(state.get("scientific_references"), dict) else None,
+            )
+            process_entry = processes[0] if processes and isinstance(processes[0], dict) else process_entry
             return {
                 "processes": [process_entry],
                 "process_routes": [{"route_id": "R1", "route_name": "Default route", "processes": [process_entry]}],
                 "selected_route_id": "R1",
+                "chain_contract": _build_chain_contract([process_entry]),
+                "reference_output_decision_summary": reference_output_summary,
                 "step_markers": _update_step_markers(state, "step2"),
             }
         # Search for scientific references for process splitting
@@ -6095,10 +8213,22 @@ def _build_langgraph(
                 references_text = _format_references_for_prompt(references)
         reference_clusters = _reference_clusters(scientific_references) if use_references else None
 
-        # Build enhanced prompt with references
+        # Build enhanced prompt with references + ILCD method guardrails
         enhanced_prompt = PROCESS_SPLIT_PROMPT
         if references_text:
-            enhanced_prompt = f"{PROCESS_SPLIT_PROMPT}\n\n" f"Use the following scientific references to identify and split unit processes:\n" f"{references_text}\n"
+            enhanced_prompt = (
+                f"{PROCESS_SPLIT_PROMPT}\n\n"
+                f"Use the following scientific references to identify and split unit processes:\n"
+                f"{references_text}\n"
+            )
+        guardrails_text = _load_ilcd_guardrails_excerpt()
+        if guardrails_text:
+            enhanced_prompt = (
+                f"{enhanced_prompt}\n\n"
+                "Apply the following ILCD method guardrails (database-building context). "
+                "Treat these as hard policy constraints whenever they conflict with weak assumptions:\n"
+                f"{guardrails_text}\n"
+            )
 
         payload = {
             "prompt": enhanced_prompt,
@@ -6178,6 +8308,20 @@ def _build_langgraph(
                 selected_route_id = str(selected_route.get("route_id") or "")
         if selected_route:
             processes = selected_route.get("processes") or []
+            processes, reference_output_summary = _apply_reference_output_unit_policy(
+                processes=[item for item in processes if isinstance(item, dict)],
+                flow_summary=state.get("flow_summary") or {},
+                flow_dataset=state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None,
+                operation=str(operation or "produce"),
+                llm=llm,
+                scientific_references=scientific_references if isinstance(scientific_references, dict) else None,
+            )
+            selected_route["processes"] = processes
+            if selected_route_id:
+                for route in cleaned_routes:
+                    if isinstance(route, dict) and str(route.get("route_id") or "") == selected_route_id:
+                        route["processes"] = processes
+                        break
             tech_routes = state.get("technology_routes") or []
             selected_summary = None
             if isinstance(tech_routes, list):
@@ -6189,7 +8333,9 @@ def _build_langgraph(
                 "process_routes": cleaned_routes,
                 "selected_route_id": selected_route_id,
                 "processes": processes,
+                "chain_contract": _build_chain_contract(processes),
                 "scientific_references": scientific_references,
+                "reference_output_decision_summary": reference_output_summary,
                 "step_markers": _update_step_markers(state, "step2"),
             }
             if selected_summary and not state.get("technical_description"):
@@ -6227,34 +8373,76 @@ def _build_langgraph(
             cleaned[0]["is_reference_flow_process"] = True
             for proc in cleaned[1:]:
                 proc["is_reference_flow_process"] = False
+        cleaned = _normalize_route_processes(
+            cleaned,
+            flow_summary=state.get("flow_summary") or {},
+            route_name="Default route",
+        )
+        cleaned, reference_output_summary = _apply_reference_output_unit_policy(
+            processes=cleaned,
+            flow_summary=state.get("flow_summary") or {},
+            flow_dataset=state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None,
+            operation=str(operation or "produce"),
+            llm=llm,
+            scientific_references=scientific_references if isinstance(scientific_references, dict) else None,
+        )
         return {
             "processes": cleaned,
+            "chain_contract": _build_chain_contract(cleaned),
             "scientific_references": scientific_references,
+            "reference_output_decision_summary": reference_output_summary,
             "step_markers": _update_step_markers(state, "step2"),
         }
 
     def generate_exchanges(state: ProcessFromFlowState) -> ProcessFromFlowState:
         if state.get("process_exchanges"):
-            updates: dict[str, Any] = {"step_markers": _update_step_markers(state, "step3")}
+            chain_contract = state.get("chain_contract") if isinstance(state.get("chain_contract"), list) else _build_chain_contract(state.get("processes"))
+            existing_process_exchanges = state.get("process_exchanges") if isinstance(state.get("process_exchanges"), list) else []
+            enforced_processes, chain_link_enforcement = _enforce_chain_input_links(
+                chain_contract=chain_contract,
+                process_exchanges=existing_process_exchanges,
+            )
+            updates: dict[str, Any] = {
+                "step_markers": _update_step_markers(state, "step3"),
+                "chain_contract": chain_contract,
+                "chain_link_enforcement": chain_link_enforcement,
+            }
+            if enforced_processes != existing_process_exchanges:
+                updates["process_exchanges"] = enforced_processes
             coverage_metrics = state.get("coverage_metrics")
             if not isinstance(coverage_metrics, dict):
-                coverage_metrics = _compute_coverage_metrics(state.get("process_exchanges") or [])
+                coverage_metrics = _compute_coverage_metrics(enforced_processes)
                 updates["coverage_metrics"] = coverage_metrics
             if not isinstance(state.get("stop_rule_decision"), dict):
-                updates["stop_rule_decision"] = _evaluate_stop_rules(state, coverage_metrics)
+                stop_state = dict(state)
+                stop_state["process_exchanges"] = enforced_processes
+                updates["stop_rule_decision"] = _evaluate_stop_rules(stop_state, coverage_metrics)
             if not isinstance(state.get("coverage_history"), list):
-                updates["coverage_history"] = _append_coverage_history(state, coverage_metrics)
+                history_state = dict(state)
+                history_state["process_exchanges"] = enforced_processes
+                updates["coverage_history"] = _append_coverage_history(history_state, coverage_metrics)
             return updates
         if llm is None:
             summary = state.get("flow_summary") or {}
             base_name = summary.get("base_name_en") or "reference flow"
             direction = _reference_direction(state.get("operation"))
+            plans = [item for item in (state.get("processes") or []) if isinstance(item, dict)]
+            first_plan = plans[0] if plans else {}
+            fallback_flow_dataset = state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None
+            amount_text, reference_unit = _reference_basis_from_process_plan(
+                process_plan=first_plan,
+                fallback_flow_dataset=fallback_flow_dataset,
+                is_reference_flow_process=bool(first_plan.get("is_reference_flow_process")),
+                policy=_load_reference_output_policy(),
+                flow_property_id=_flow_property_id_from_flow_dataset(fallback_flow_dataset) if bool(first_plan.get("is_reference_flow_process")) else None,
+                registry=_load_flow_property_unit_registry(),
+            )
             exchange = {
                 "exchangeDirection": direction,
                 "exchangeName": base_name,
                 "generalComment": summary.get("general_comment_en") or "",
-                "unit": None,
-                "amount": None,
+                "unit": reference_unit,
+                "amount": amount_text,
                 "is_reference_flow": True,
             }
             exchange = _apply_exchange_evidence_defaults(
@@ -6268,14 +8456,23 @@ def _build_langgraph(
             _merge_value_evidence(exchange, citations, evidence)
             _ensure_exchange_comment_tags(exchange)
             process_exchanges = [{"process_id": "P1", "exchanges": [exchange]}]
-            coverage_metrics = _compute_coverage_metrics(process_exchanges)
-            stop_rule_decision = _evaluate_stop_rules(state, coverage_metrics)
-            coverage_history = _append_coverage_history(state, coverage_metrics)
+            chain_contract = state.get("chain_contract") if isinstance(state.get("chain_contract"), list) else _build_chain_contract(state.get("processes"))
+            enforced_processes, chain_link_enforcement = _enforce_chain_input_links(
+                chain_contract=chain_contract,
+                process_exchanges=process_exchanges,
+            )
+            coverage_metrics = _compute_coverage_metrics(enforced_processes)
+            stop_state = dict(state)
+            stop_state["process_exchanges"] = enforced_processes
+            stop_rule_decision = _evaluate_stop_rules(stop_state, coverage_metrics)
+            coverage_history = _append_coverage_history(stop_state, coverage_metrics)
             return {
-                "process_exchanges": process_exchanges,
+                "process_exchanges": enforced_processes,
                 "coverage_metrics": coverage_metrics,
                 "coverage_history": coverage_history,
                 "stop_rule_decision": stop_rule_decision,
+                "chain_contract": chain_contract,
+                "chain_link_enforcement": chain_link_enforcement,
                 "step_markers": _update_step_markers(state, "step3"),
             }
         # Search for scientific references for exchange generation
@@ -6335,10 +8532,22 @@ def _build_langgraph(
                 references_text = _format_references_for_prompt(references)
         reference_clusters = _reference_clusters(scientific_references) if use_references else None
 
-        # Build enhanced prompt with references
+        # Build enhanced prompt with references + ILCD method guardrails
         enhanced_prompt = EXCHANGES_PROMPT
         if references_text:
-            enhanced_prompt = f"{EXCHANGES_PROMPT}\n\n" f"Use the following scientific references to confirm exchange flow names and amounts:\n" f"{references_text}\n"
+            enhanced_prompt = (
+                f"{EXCHANGES_PROMPT}\n\n"
+                f"Use the following scientific references to confirm exchange flow names and amounts:\n"
+                f"{references_text}\n"
+            )
+        guardrails_text = _load_ilcd_guardrails_excerpt()
+        if guardrails_text:
+            enhanced_prompt = (
+                f"{enhanced_prompt}\n\n"
+                "Apply the following ILCD method guardrails for basis consistency and comparability "
+                "before finalizing exchange units/amounts:\n"
+                f"{guardrails_text}\n"
+            )
 
         payload = {
             "prompt": enhanced_prompt,
@@ -6360,6 +8569,10 @@ def _build_langgraph(
         process_plan_index = {str(item.get("process_id") or ""): item for item in (state.get("processes") or []) if isinstance(item, dict)}
         target_flow_name = str((state.get("flow_summary") or {}).get("base_name_en") or "reference flow").strip()
         reference_direction = _reference_direction(state.get("operation"))
+        reference_output_policy = _load_reference_output_policy()
+        fallback_flow_dataset = state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None
+        reference_registry = _load_flow_property_unit_registry()
+        target_flow_property_id = _flow_property_id_from_flow_dataset(fallback_flow_dataset)
         cleaned_processes: list[dict[str, Any]] = []
         for proc in processes:
             if not isinstance(proc, dict):
@@ -6369,10 +8582,21 @@ def _build_langgraph(
             if not isinstance(exchanges, list):
                 exchanges = []
             plan = process_plan_index.get(process_id) or {}
+            reference_basis = plan.get("reference_output_basis") if isinstance(plan.get("reference_output_basis"), dict) else {}
+            reference_basis_confidence = _coerce_confidence(reference_basis.get("confidence"))
             plan_reference_flow = str(plan.get("reference_flow_name") or "").strip()
             is_reference_flow_process = bool(plan.get("is_reference_flow_process"))
             if is_reference_flow_process:
                 plan_reference_flow = target_flow_name
+            reference_flow_property_id = target_flow_property_id if is_reference_flow_process else None
+            reference_amount_text, reference_unit = _reference_basis_from_process_plan(
+                process_plan=plan,
+                fallback_flow_dataset=fallback_flow_dataset,
+                is_reference_flow_process=is_reference_flow_process,
+                policy=reference_output_policy,
+                flow_property_id=reference_flow_property_id,
+                registry=reference_registry,
+            )
             structure = plan.get("structure") if isinstance(plan.get("structure"), dict) else {}
             structure_inputs = {_normalize_exchange_name(_strip_flow_label(value)) for value in _clean_string_list(structure.get("inputs")) if _strip_flow_label(value).strip()}
             structure_outputs = {_normalize_exchange_name(_strip_flow_label(value)) for value in _clean_string_list(structure.get("outputs")) if _strip_flow_label(value).strip()}
@@ -6383,7 +8607,7 @@ def _build_langgraph(
                     continue
                 name = _strip_flow_label(str(exchange.get("exchangeName") or "").strip())
                 raw_flow_type = _normalize_flow_type(exchange.get("flow_type") or exchange.get("flowType"))
-                unit = str(exchange.get("unit") or "").strip() or "unit"
+                unit = str(exchange.get("unit") or "").strip()
                 amount = _coerce_amount_text(exchange.get("amount"))
                 exchange_direction = str(exchange.get("exchangeDirection") or "").strip()
                 name_key = _normalize_exchange_name(name)
@@ -6412,15 +8636,56 @@ def _build_langgraph(
                     flow_type=flow_type,
                     is_reference_flow=is_reference,
                 )
+                if is_reference:
+                    if not unit or _is_count_style_unit(unit):
+                        unit = reference_unit
+                    if not amount:
+                        amount = reference_amount_text
+                resolved_unit = unit
+                if not resolved_unit:
+                    if is_reference:
+                        resolved_unit = reference_unit
+                    else:
+                        resolved_unit = _reference_output_fallback_unit(reference_output_policy)
+                validation = validate_reference_output_decision(
+                    stage="step3_exchange",
+                    unit=resolved_unit,
+                    policy=reference_output_policy,
+                    registry=reference_registry,
+                    flow_property_id=reference_flow_property_id if is_reference else None,
+                    exchange_name=name,
+                    flow_name=plan_reference_flow if is_reference else None,
+                    flow_type=flow_type,
+                    is_reference_flow=is_reference,
+                    confidence=reference_basis_confidence if is_reference else None,
+                )
+                corrected_unit = _canonical_reference_unit(str(validation.get("recommended_unit") or "").strip())
+                if corrected_unit and corrected_unit != resolved_unit:
+                    resolved_unit = corrected_unit
+                    exchange["generalComment"] = _append_reference_rule_comment(
+                        str(exchange.get("generalComment") or "").strip(),
+                        "Reference-output policy: corrected unit to match registry/policy constraints.",
+                    )
                 cleaned_exchange = {
                     **exchange,
                     "exchangeName": name,
-                    "unit": unit,
+                    "unit": resolved_unit,
                     "amount": amount,
                     "is_reference_flow": is_reference,
                     "exchangeDirection": exchange_direction,
                     "flow_type": flow_type,
                 }
+                if isinstance(validation.get("violations"), list):
+                    violation_codes = [
+                        str(item.get("code") or "").strip()
+                        for item in validation.get("violations")
+                        if isinstance(item, dict)
+                    ]
+                    if violation_codes:
+                        cleaned_exchange["reference_output_validation"] = {
+                            "codes": [code for code in violation_codes if code],
+                            "hold": bool(validation.get("hold")),
+                        }
                 material_role = _normalize_material_role(exchange.get("material_role") or exchange.get("materialRole"))
                 if material_role:
                     cleaned_exchange["material_role"] = material_role
@@ -6442,18 +8707,43 @@ def _build_langgraph(
                 citations = _clean_evidence_list(data_source.get("citations")) if isinstance(data_source, dict) else []
                 evidence = _clean_evidence_list(cleaned_exchange.get("evidence"))
                 _merge_value_evidence(cleaned_exchange, citations, evidence)
-                _ensure_exchange_comment_tags(cleaned_exchange)
                 cleaned_exchanges.append(cleaned_exchange)
             if plan_reference_flow and not matched_reference:
                 reference_exchange = {
                     "exchangeDirection": reference_direction,
                     "exchangeName": plan_reference_flow,
                     "generalComment": "Reference flow for this unit process.",
-                    "unit": "unit",
-                    "amount": "1",
+                    "unit": reference_unit,
+                    "amount": reference_amount_text,
                     "is_reference_flow": True,
                     "flow_type": "product",
                 }
+                reference_validation = validate_reference_output_decision(
+                    stage="step3_reference_injection",
+                    unit=reference_exchange.get("unit"),
+                    policy=reference_output_policy,
+                    registry=reference_registry,
+                    flow_property_id=reference_flow_property_id,
+                    exchange_name=plan_reference_flow,
+                    flow_name=plan_reference_flow,
+                    flow_type="product",
+                    is_reference_flow=True,
+                    confidence=reference_basis_confidence,
+                )
+                injected_unit = _canonical_reference_unit(str(reference_validation.get("recommended_unit") or "").strip())
+                if injected_unit:
+                    reference_exchange["unit"] = injected_unit
+                if isinstance(reference_validation.get("violations"), list):
+                    reference_codes = [
+                        str(item.get("code") or "").strip()
+                        for item in reference_validation.get("violations")
+                        if isinstance(item, dict)
+                    ]
+                    if reference_codes:
+                        reference_exchange["reference_output_validation"] = {
+                            "codes": [code for code in reference_codes if code],
+                            "hold": bool(reference_validation.get("hold")),
+                        }
                 reference_exchange = _apply_exchange_evidence_defaults(
                     reference_exchange,
                     use_references=use_references,
@@ -6463,7 +8753,6 @@ def _build_langgraph(
                 citations = _clean_evidence_list(data_source.get("citations")) if isinstance(data_source, dict) else []
                 evidence = _clean_evidence_list(reference_exchange.get("evidence"))
                 _merge_value_evidence(reference_exchange, citations, evidence)
-                _ensure_exchange_comment_tags(reference_exchange)
                 cleaned_exchanges.append(reference_exchange)
             cleaned_exchanges = _dedupe_reference_exchanges(
                 cleaned_exchanges,
@@ -6483,18 +8772,37 @@ def _build_langgraph(
                 ]
                 if filtered:
                     cleaned_exchanges = filtered
+            _batch_classify_exchange_io_kind_tags(
+                llm=llm,
+                flow_summary=flow_summary,
+                process_plan=plan,
+                process_id=process_id,
+                operation=operation,
+                exchanges=cleaned_exchanges,
+            )
+            for exchange_item in cleaned_exchanges:
+                if isinstance(exchange_item, dict):
+                    _ensure_exchange_comment_tags(exchange_item)
             cleaned_processes.append({"process_id": process_id, "exchanges": cleaned_exchanges})
-        coverage_metrics = _compute_coverage_metrics(cleaned_processes)
+        chain_contract = state.get("chain_contract") if isinstance(state.get("chain_contract"), list) else _build_chain_contract(state.get("processes"))
+        enforced_processes, chain_link_enforcement = _enforce_chain_input_links(
+            chain_contract=chain_contract,
+            process_exchanges=cleaned_processes,
+        )
+        coverage_metrics = _compute_coverage_metrics(enforced_processes)
         stop_state = dict(state)
         stop_state["scientific_references"] = scientific_references
+        stop_state["process_exchanges"] = enforced_processes
         stop_rule_decision = _evaluate_stop_rules(stop_state, coverage_metrics)
         coverage_history = _append_coverage_history(stop_state, coverage_metrics)
         return {
-            "process_exchanges": cleaned_processes,
+            "process_exchanges": enforced_processes,
             "scientific_references": scientific_references,
             "coverage_metrics": coverage_metrics,
             "coverage_history": coverage_history,
             "stop_rule_decision": stop_rule_decision,
+            "chain_contract": chain_contract,
+            "chain_link_enforcement": chain_link_enforcement,
             "step_markers": _update_step_markers(state, "step3"),
         }
 
@@ -6656,6 +8964,20 @@ def _build_langgraph(
             "scientific_references": scientific_references,
         }
 
+    def preflight_chain_continuity(state: ProcessFromFlowState) -> ProcessFromFlowState:
+        chain_contract = state.get("chain_contract") if isinstance(state.get("chain_contract"), list) else _build_chain_contract(state.get("processes"))
+        preflight = _run_chain_preflight(
+            chain_contract=chain_contract,
+            process_exchanges=state.get("process_exchanges"),
+        )
+        updates: dict[str, Any] = {
+            "chain_contract": chain_contract,
+            "chain_preflight": preflight,
+        }
+        if preflight.get("status") == "failed":
+            LOGGER.warning("process_from_flow.chain_preflight_failed", errors=preflight.get("errors"), checked_pairs=preflight.get("checked_pairs"))
+        return updates
+
     def match_flows(state: ProcessFromFlowState) -> ProcessFromFlowState:
         if state.get("matched_process_exchanges"):
             return {}
@@ -6717,16 +9039,19 @@ def _build_langgraph(
                     name = str(exchange.get("exchangeName") or "").strip()
                     comment = _strip_exchange_comment_tags(exchange.get("generalComment")) or None
                     flow_type = _normalize_flow_type(exchange.get("flow_type")) or None
-                    direction = str(exchange.get("exchangeDirection") or "").strip() or None
+                    direction = _normalize_exchange_direction_value(exchange.get("exchangeDirection")) or str(exchange.get("exchangeDirection") or "").strip() or None
                     unit = str(exchange.get("unit") or "").strip() or None
                     search_hints = exchange.get("search_hints") or []
                     expected_compartment = _infer_media_suffix(f"{name} {comment or ''}")
+                    io_kind_tag = _exchange_kind_for_comment_tag(exchange, direction=str(direction or ""))
 
                     constraint_bits: list[str] = []
                     if flow_type:
                         constraint_bits.append(f"flow_type={flow_type}")
                     if direction:
                         constraint_bits.append(f"direction={direction}")
+                    if io_kind_tag:
+                        constraint_bits.append(f"io_kind={io_kind_tag}")
                     if unit:
                         constraint_bits.append(f"unit={unit}")
                     if expected_compartment:
@@ -6749,6 +9074,10 @@ def _build_langgraph(
                             "comment": comment,
                             "query_desc": query_desc,
                             "query": query,
+                            "flow_type": flow_type,
+                            "direction": direction,
+                            "io_kind_tag": io_kind_tag,
+                            "expected_compartment": expected_compartment,
                         }
                     )
 
@@ -6770,10 +9099,21 @@ def _build_langgraph(
                     comment = item["comment"]
                     query_desc = item["query_desc"]
                     query = item["query"]
+                    flow_type = item.get("flow_type")
+                    direction = item.get("direction")
+                    io_kind_tag = item.get("io_kind_tag")
+                    expected_compartment = item.get("expected_compartment")
                     candidates, unmatched = item["search_result"]
 
                     candidates = _dedupe_candidates_by_uuid_version(candidates)
-                    candidates = candidates[:10]
+                    route = _route_flow_match_candidates(
+                        candidates,
+                        expected_flow_type=flow_type,
+                        direction=direction,
+                        io_kind_tag=io_kind_tag,
+                        expected_compartment=expected_compartment,
+                    )
+                    candidates = route.candidates[:10]
                     # Build a minimal exchange dict for selector context.
                     selector_exchange = {
                         "exchangeName": query.exchange_name,
@@ -6783,6 +9123,7 @@ def _build_langgraph(
                         "reference_flow_name": reference_flow_name,
                         "flow_type": exchange.get("flow_type"),
                         "material_role": exchange.get("material_role"),
+                        "io_kind_tag": io_kind_tag,
                         "search_hints": exchange.get("search_hints") or [],
                     }
                     decision = selector.select(query, selector_exchange, candidates)
@@ -6818,6 +9159,10 @@ def _build_langgraph(
                                 "selected_uuid": selected.uuid if selected else None,
                                 "selected_reason": selected_reason,
                                 "selector": decision.strategy,
+                                "routing_decision": route.routing_decision,
+                                "compartment_decision": route.compartment_decision,
+                                "manual_review_required": route.manual_review_required,
+                                "routing_trace": route.trace,
                                 "unmatched": [getattr(entry, "base_name", None) for entry in (unmatched or [])],
                             },
                         }
@@ -6852,6 +9197,49 @@ def _build_langgraph(
             elapsed_seconds=round(elapsed_total, 2),
         )
         return {"matched_process_exchanges": matched}
+
+    def sync_chain_link_uuids(state: ProcessFromFlowState) -> ProcessFromFlowState:
+        matched_process_exchanges = state.get("matched_process_exchanges")
+        chain_contract = state.get("chain_contract") if isinstance(state.get("chain_contract"), list) else _build_chain_contract(state.get("processes"))
+        if not isinstance(matched_process_exchanges, list):
+            summary = {
+                "stage": "post_match",
+                "status": "insufficient",
+                "apply_repairs": True,
+                "checked_pairs": 0,
+                "ok_pairs": 0,
+                "repaired_pairs": 0,
+                "mismatch_pairs": 0,
+                "missing_exchange_pairs": 0,
+                "missing_uuid_pairs": 0,
+                "issues": [{"code": "matched_process_exchanges_missing"}],
+                "repairs": [],
+            }
+            return {
+                "chain_contract": chain_contract,
+                "chain_uuid_sync": summary,
+            }
+        updated_matches, summary = _sync_chain_link_uuids(
+            chain_contract=chain_contract,
+            process_exchanges=matched_process_exchanges,
+            apply_repairs=True,
+            stage="post_match",
+        )
+        if str(summary.get("status") or "").strip().lower() == "check":
+            LOGGER.warning(
+                "process_from_flow.chain_uuid_sync_check",
+                stage=summary.get("stage"),
+                mismatch_pairs=summary.get("mismatch_pairs"),
+                missing_exchange_pairs=summary.get("missing_exchange_pairs"),
+                missing_uuid_pairs=summary.get("missing_uuid_pairs"),
+                repaired_pairs=summary.get("repaired_pairs"),
+                checked_pairs=summary.get("checked_pairs"),
+            )
+        return {
+            "matched_process_exchanges": updated_matches,
+            "chain_contract": chain_contract,
+            "chain_uuid_sync": summary,
+        }
 
     def align_exchange_units(state: ProcessFromFlowState) -> ProcessFromFlowState:
         if state.get("unit_alignment_applied"):
@@ -7366,6 +9754,10 @@ def _build_langgraph(
         source_reference_items = _coerce_global_reference_items(source_references)
         default_reference_items = source_reference_items or _entry_level_compliance_reference()
         source_reference_index = _build_source_reference_index(source_datasets, source_references) if source_datasets and source_references else {}
+        reference_output_policy = _load_reference_output_policy()
+        reference_registry = _load_flow_property_unit_registry()
+        fallback_flow_dataset = state.get("flow_dataset") if isinstance(state.get("flow_dataset"), dict) else None
+        target_flow_property_id = _flow_property_id_from_flow_dataset(fallback_flow_dataset)
 
         process_plans = {str(item.get("process_id") or ""): item for item in (state.get("processes") or []) if isinstance(item, dict)}
         exchange_plans = {str(item.get("process_id") or ""): item for item in (state.get("matched_process_exchanges") or []) if isinstance(item, dict)}
@@ -7486,6 +9878,14 @@ def _build_langgraph(
                 process_reference_items: dict[str, GlobalReferenceTypeVariant1Item] = {}
                 reference_internal_id: str | None = None
                 next_internal_id = 1
+                reference_amount_text, reference_unit = _reference_basis_from_process_plan(
+                    process_plan=plan,
+                    fallback_flow_dataset=fallback_flow_dataset,
+                    is_reference_flow_process=is_reference_flow_process,
+                    policy=reference_output_policy,
+                    flow_property_id=target_flow_property_id if is_reference_flow_process else None,
+                    registry=reference_registry,
+                )
                 if isinstance(exchanges_raw, list):
                     exchanges_raw = _dedupe_product_uuid_exchanges(
                         exchanges_raw,
@@ -7543,7 +9943,7 @@ def _build_langgraph(
                                 comment_text = f"{comment_text} {evidence_text}"
                         else:
                             comment_text = evidence_text
-                    comment_flow_kind = _exchange_flow_type_for_dedupe(exchange, direction=direction)
+                    comment_flow_kind = _exchange_kind_for_comment_tag(exchange, direction=direction)
                     comment_unit = _resolve_exchange_comment_tag_unit(
                         exchange,
                         reference_info=reference_info,
@@ -7596,33 +9996,46 @@ def _build_langgraph(
                                 translator=translator,
                             ),
                             exchange_direction=reference_direction,
-                            mean_amount=_default_exchange_amount(),
-                            resulting_amount=_default_exchange_amount(),
+                            mean_amount=reference_amount_text,
+                            resulting_amount=reference_amount_text,
                             data_derivation_type_status="Estimated",
                             general_comment=_as_multilang_list(
                                 _build_multilang_entries(
                                     _apply_exchange_comment_tags(
                                         flow_summary.get("general_comment_en") or "",
                                         flow_kind="product",
-                                        unit="unit",
+                                        unit=reference_unit,
                                     ),
                                     translator=translator,
                                     zh_text=_apply_exchange_comment_tags(
                                         flow_summary.get("general_comment_zh") or "",
                                         flow_kind="product",
-                                        unit="unit",
+                                        unit=reference_unit,
                                     ),
                                 )
                             ),
                         )
                     )
 
-                functional_unit = quantitative_ref or f"1 unit of {process_reference_flow}".strip()
+                functional_unit = quantitative_ref or _format_quantitative_reference(
+                    amount=_parse_amount_value(reference_amount_text),
+                    unit=reference_unit,
+                    flow_name=process_reference_flow,
+                )
                 if is_reference_flow_process:
                     if reference_direction == "Input":
-                        functional_unit = quantitative_ref or f"1 unit of {target_flow_name} treated"
+                        base_functional = quantitative_ref or _format_quantitative_reference(
+                            amount=_parse_amount_value(reference_amount_text),
+                            unit=reference_unit,
+                            flow_name=target_flow_name,
+                        )
+                        functional_unit = f"{base_functional} treated" if not quantitative_ref else quantitative_ref
                     else:
-                        functional_unit = quantitative_ref or f"1 unit of {target_flow_name}"
+                        functional_unit = quantitative_ref or _format_quantitative_reference(
+                            amount=_parse_amount_value(reference_amount_text),
+                            unit=reference_unit,
+                            flow_name=target_flow_name,
+                        )
 
                 name_entries = _build_multilang_entries(base_name_for_dataset, translator=translator)
                 treatment_entries = _build_multilang_entries(treatment_route, translator=translator)
@@ -7669,7 +10082,27 @@ def _build_langgraph(
                 location_kwargs: dict[str, Any] = {"location": location_code}
                 if restriction_entries:
                     location_kwargs["description_of_restrictions"] = _as_multilang_list(restriction_entries)
-                location = ProcessInformationGeographyLocationOfOperationSupplyOrProduction(**location_kwargs)
+                try:
+                    location = ProcessInformationGeographyLocationOfOperationSupplyOrProduction(**location_kwargs)
+                except Exception as exc:  # pylint: disable=broad-except
+                    repaired_code, repair_reason = _repair_location_code_after_validation_error(
+                        location_code=location_code,
+                        geo_candidates=geo_candidates,
+                        mix_location=mix_location,
+                    )
+                    if repaired_code and repaired_code != location_code:
+                        LOGGER.warning(
+                            "process_from_flow.location_code_repaired_after_validation",
+                            process_id=process_id,
+                            original_location=location_code,
+                            repaired_location=repaired_code,
+                            reason=repair_reason,
+                            error=str(exc),
+                        )
+                        location_kwargs["location"] = repaired_code
+                        location = ProcessInformationGeographyLocationOfOperationSupplyOrProduction(**location_kwargs)
+                    else:
+                        raise
                 geography = ProcessDataSetProcessInformationGeography(location_of_operation_supply_or_production=location)
                 process_info_kwargs = {
                     "data_set_information": data_set_information,
@@ -7827,10 +10260,11 @@ def _build_langgraph(
                 exchange_name = str(matched_exchange.get("exchangeName") or entry.get("exchange_name") or "").strip()
                 comment = _strip_exchange_comment_tags(matched_exchange.get("generalComment"))
                 flow_type = _normalize_flow_type(matched_exchange.get("flow_type")) or matched_exchange.get("flow_type")
-                direction = str(matched_exchange.get("exchangeDirection") or "").strip()
+                direction = _normalize_exchange_direction_value(matched_exchange.get("exchangeDirection")) or str(matched_exchange.get("exchangeDirection") or "").strip()
                 unit = str(matched_exchange.get("unit") or "").strip()
                 search_hints = matched_exchange.get("search_hints") if isinstance(matched_exchange.get("search_hints"), list) else []
                 expected_compartment = _infer_media_suffix(f"{exchange_name} {comment}")
+                io_kind_tag = _exchange_kind_for_comment_tag(matched_exchange, direction=str(direction or ""))
 
                 query_payload = _build_placeholder_one_shot_query_payload(
                     llm=llm,
@@ -7838,6 +10272,7 @@ def _build_langgraph(
                     comment=comment,
                     flow_type=flow_type,
                     direction=direction,
+                    io_kind_tag=io_kind_tag,
                     unit=unit,
                     expected_compartment=expected_compartment,
                     search_hints=search_hints,
@@ -7864,12 +10299,23 @@ def _build_langgraph(
                             error=search_error,
                         )
                 candidates = _dedupe_candidates_by_uuid_version(candidates)
-                selection_candidates = candidates[:10]
+                route = _route_flow_match_candidates(
+                    candidates,
+                    expected_flow_type=flow_type,
+                    direction=direction,
+                    io_kind_tag=io_kind_tag,
+                    expected_compartment=expected_compartment,
+                )
+                selection_candidates = route.candidates[:10]
                 filter_info = {
-                    "mode": "disabled",
-                    "reason": "one_shot_top10_direct_to_selector",
-                    "expected_flow_type": flow_type,
-                    "expected_compartment": expected_compartment,
+                    "mode": "route_policy",
+                    "reason": "type_kind_compartment_progressive_relaxation",
+                    "expected_flow_type": route.routing_decision.get("expected_flow_type"),
+                    "expected_elementary_kind": route.routing_decision.get("expected_elementary_kind"),
+                    "expected_compartment": route.compartment_decision.get("expected_compartment"),
+                    "selected_stage": route.routing_decision.get("selected_stage"),
+                    "manual_review_required": route.manual_review_required,
+                    "trace": route.trace,
                     "candidate_total": len(selection_candidates),
                 }
 
@@ -7877,6 +10323,7 @@ def _build_langgraph(
                     "exchangeName": exchange_name,
                     "generalComment": comment,
                     "flow_type": flow_type,
+                    "io_kind_tag": io_kind_tag,
                     "search_hints": search_hints,
                     "exchangeDirection": direction,
                 }
@@ -7940,6 +10387,7 @@ def _build_langgraph(
                     "classification_hints": query_payload.get("classification_hints"),
                     "flow_type": query_payload.get("flow_type"),
                     "direction": query_payload.get("direction"),
+                    "io_kind": query_payload.get("io_kind"),
                     "unit": query_payload.get("unit"),
                     "compartment": query_payload.get("compartment"),
                 }
@@ -7950,6 +10398,10 @@ def _build_langgraph(
                 flow_search["resolution_candidates"] = candidate_list
                 flow_search["resolution_raw_candidates"] = raw_candidate_list
                 flow_search["resolution_filters"] = filter_info
+                flow_search["routing_decision"] = route.routing_decision
+                flow_search["compartment_decision"] = route.compartment_decision
+                flow_search["manual_review_required"] = route.manual_review_required
+                flow_search["routing_trace"] = route.trace
                 if search_error:
                     flow_search["resolution_search_error"] = search_error
                 if selected is not None:
@@ -8020,6 +10472,7 @@ def _build_langgraph(
                             "classification_hints": query_payload.get("classification_hints"),
                             "flow_type": query_payload.get("flow_type"),
                             "direction": query_payload.get("direction"),
+                            "io_kind": query_payload.get("io_kind"),
                             "unit": query_payload.get("unit"),
                             "compartment": query_payload.get("compartment"),
                             "query_text": query_text,
@@ -8040,6 +10493,49 @@ def _build_langgraph(
             "placeholder_report": resolutions,
             "placeholder_resolution_applied": True,
             "step_markers": _update_step_markers(state, "placeholders"),
+        }
+
+    def verify_chain_link_uuids(state: ProcessFromFlowState) -> ProcessFromFlowState:
+        matched_process_exchanges = state.get("matched_process_exchanges")
+        chain_contract = state.get("chain_contract") if isinstance(state.get("chain_contract"), list) else _build_chain_contract(state.get("processes"))
+        if not isinstance(matched_process_exchanges, list):
+            summary = {
+                "stage": "post_placeholder_verify",
+                "status": "insufficient",
+                "apply_repairs": False,
+                "checked_pairs": 0,
+                "ok_pairs": 0,
+                "repaired_pairs": 0,
+                "mismatch_pairs": 0,
+                "missing_exchange_pairs": 0,
+                "missing_uuid_pairs": 0,
+                "issues": [{"code": "matched_process_exchanges_missing"}],
+                "repairs": [],
+            }
+            return {
+                "chain_contract": chain_contract,
+                "chain_uuid_verify": summary,
+            }
+        _, summary = _sync_chain_link_uuids(
+            chain_contract=chain_contract,
+            process_exchanges=matched_process_exchanges,
+            apply_repairs=False,
+            stage="post_placeholder_verify",
+        )
+        status = str(summary.get("status") or "").strip().lower()
+        if status in {"check", "insufficient"}:
+            LOGGER.warning(
+                "process_from_flow.chain_uuid_verify_status",
+                stage=summary.get("stage"),
+                status=status,
+                mismatch_pairs=summary.get("mismatch_pairs"),
+                missing_exchange_pairs=summary.get("missing_exchange_pairs"),
+                missing_uuid_pairs=summary.get("missing_uuid_pairs"),
+                checked_pairs=summary.get("checked_pairs"),
+            )
+        return {
+            "chain_contract": chain_contract,
+            "chain_uuid_verify": summary,
         }
 
     def balance_review(state: ProcessFromFlowState) -> ProcessFromFlowState:
@@ -8145,10 +10641,7 @@ def _build_langgraph(
                         direction = "Input"
                     if bool(exchange.get("is_reference_flow")):
                         direction = reference_direction
-                    comment_tags = _parse_exchange_comment_tags(exchange.get("generalComment"))
-                    flow_kind = _normalize_flow_type(comment_tags.get(_EXCHANGE_KIND_TAG_NAME))
-                    if not flow_kind:
-                        flow_kind = _exchange_flow_type_for_dedupe(exchange, direction=direction)
+                    flow_kind = _exchange_flow_type_for_dedupe(exchange, direction=direction)
                     is_core_exchange = _is_core_mass_exchange(
                         material_role=material_role,
                         flow_kind=flow_kind,
@@ -8555,13 +11048,16 @@ def _build_langgraph(
     graph.add_node("split_processes", split_processes)
     graph.add_node("generate_exchanges", generate_exchanges)
     graph.add_node("enrich_exchange_amounts", enrich_exchange_amounts)
+    graph.add_node("preflight_chain_continuity", preflight_chain_continuity)
     graph.add_node("match_flows", match_flows)
+    graph.add_node("sync_chain_link_uuids", sync_chain_link_uuids)
     graph.add_node("align_exchange_units", align_exchange_units)
     graph.add_node("density_conversion", density_conversion)
     graph.add_node("build_sources", build_sources)
     graph.add_node("generate_intended_applications", generate_intended_applications)
     graph.add_node("build_process_datasets", build_process_datasets)
     graph.add_node("resolve_placeholders", resolve_placeholders)
+    graph.add_node("verify_chain_link_uuids", verify_chain_link_uuids)
     graph.add_node("balance_review", balance_review)
     graph.add_node("generate_data_cutoff_principles", generate_data_cutoff_principles)
 
@@ -8581,10 +11077,18 @@ def _build_langgraph(
     )
     graph.add_conditional_edges(
         "enrich_exchange_amounts",
-        lambda state: END if (str(state.get("stop_after") or "").strip().lower() == "exchanges") else "match_flows",
+        lambda state: END if (str(state.get("stop_after") or "").strip().lower() == "exchanges") else "preflight_chain_continuity",
+    )
+    graph.add_conditional_edges(
+        "preflight_chain_continuity",
+        lambda state: END if (isinstance(state.get("chain_preflight"), dict) and str((state.get("chain_preflight") or {}).get("status") or "").strip().lower() == "failed") else "match_flows",
     )
     graph.add_conditional_edges(
         "match_flows",
+        lambda state: "sync_chain_link_uuids",
+    )
+    graph.add_conditional_edges(
+        "sync_chain_link_uuids",
         lambda state: END if (str(state.get("stop_after") or "").strip().lower() == "matches") else "align_exchange_units",
     )
     graph.add_edge("align_exchange_units", "density_conversion")
@@ -8595,7 +11099,8 @@ def _build_langgraph(
     )
     graph.add_edge("generate_intended_applications", "build_process_datasets")
     graph.add_edge("build_process_datasets", "resolve_placeholders")
-    graph.add_edge("resolve_placeholders", "balance_review")
+    graph.add_edge("resolve_placeholders", "verify_chain_link_uuids")
+    graph.add_edge("verify_chain_link_uuids", "balance_review")
     graph.add_edge("balance_review", "generate_data_cutoff_principles")
     graph.add_edge("generate_data_cutoff_principles", END)
 

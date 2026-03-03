@@ -171,7 +171,14 @@ def main() -> None:
         raise SystemExit(f"No references found under scientific_references.{args.step_key}.references")
 
     api_key, model, base_url = load_openai_from_env()
-    llm = OpenAIResponsesLLM(api_key=api_key, model=model, base_url=base_url)
+    llm = OpenAIResponsesLLM(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        run_id=args.run_id,
+        module="process_from_flow_reference_usability",
+        stage="02_usability",
+    )
 
     flow_summary = state.get("flow_summary") or {}
     operation = state.get("operation") or "produce"

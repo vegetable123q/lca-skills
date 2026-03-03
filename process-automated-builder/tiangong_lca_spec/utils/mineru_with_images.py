@@ -3,6 +3,7 @@ from __future__ import annotations
 import mimetypes
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ class MineruWithImagesConfig:
     provider: str | None
     model: str | None
     chunk_type: bool | None
+    return_txt: bool | None
     verify_ssl: bool
 
     def auth_headers(self) -> dict[str, str]:
@@ -47,6 +49,7 @@ class MineruWithImagesClient:
         provider: str | None = None,
         model: str | None = None,
         chunk_type: bool | None = None,
+        return_txt: bool | None = None,
         timeout: float | None = None,
     ) -> Any:
         if not file_path.exists():
@@ -60,7 +63,10 @@ class MineruWithImagesClient:
             provider if provider is not None else self._config.provider,
             model if model is not None else self._config.model,
         )
-        params = _build_params(chunk_type if chunk_type is not None else self._config.chunk_type)
+        params = _build_params(
+            chunk_type if chunk_type is not None else self._config.chunk_type,
+            return_txt if return_txt is not None else self._config.return_txt,
+        )
         timeout_seconds = timeout if timeout is not None else self._config.timeout
         headers = self._config.auth_headers()
         with httpx.Client(timeout=timeout_seconds, verify=self._config.verify_ssl, headers=headers) as client:
@@ -126,6 +132,16 @@ def load_mineru_with_images_config() -> MineruWithImagesConfig:
     provider = _optional_str(_env_first("TIANGONG_MINERU_WITH_IMAGE_PROVIDER", "MINERU_WITH_IMAGES_PROVIDER"))
     model = _optional_str(_env_first("TIANGONG_MINERU_WITH_IMAGE_MODEL", "MINERU_WITH_IMAGES_MODEL"))
     chunk_type = _coerce_bool(_env_first("TIANGONG_MINERU_WITH_IMAGE_CHUNK_TYPE", "MINERU_WITH_IMAGES_CHUNK_TYPE"), default=None)
+    return_txt = _coerce_bool(
+        _env_first(
+            "TIANGONG_MINERU_WITH_IMAGE_RETURN_TXT",
+            "MINERU_WITH_IMAGES_RETURN_TXT",
+            "MINERU_RETURN_TXT",
+        ),
+        default=True,
+    )
+    if return_txt is None:
+        return_txt = True
     verify_ssl = _coerce_bool(_env_first("TIANGONG_MINERU_WITH_IMAGE_VERIFY_SSL", "MINERU_WITH_IMAGES_VERIFY_SSL"), default=True)
     if verify_ssl is None:
         verify_ssl = True
@@ -141,6 +157,7 @@ def load_mineru_with_images_config() -> MineruWithImagesConfig:
         provider=provider,
         model=model,
         chunk_type=chunk_type,
+        return_txt=return_txt,
         verify_ssl=verify_ssl,
     )
 
@@ -165,10 +182,13 @@ def _build_payload(provider: str | None, model: str | None) -> dict[str, str]:
     return payload
 
 
-def _build_params(chunk_type: bool | None) -> dict[str, str]:
-    if chunk_type is None:
-        return {}
-    return {"chunk_type": "true" if chunk_type else "false"}
+def _build_params(chunk_type: bool | None, return_txt: bool | None) -> dict[str, str]:
+    params: dict[str, str] = {}
+    if chunk_type is not None:
+        params["chunk_type"] = "true" if chunk_type else "false"
+    if return_txt is not None:
+        params["return_txt"] = "true" if return_txt else "false"
+    return params
 
 
 def _guess_content_type(file_path: Path) -> str:
