@@ -1,0 +1,66 @@
+{
+  "@id": "lm-demo-battery-pack",
+  "@version": "00.00.001",
+  "lifeCycleModelInformation": {
+    "dataSetInformation": {
+      "name": {
+        "baseName": {
+          "@index": "Battery pack model"
+        }
+      },
+      "referenceToResultingProcess": {
+        "@refObjectId": "proc-demo-battery-pack-primary",
+        "@version": "00.00.001"
+      }
+    },
+    "quantitativeReference": {
+      "referenceToReferenceProcess": {
+        "@refObjectId": "pi-pack-assembly"
+      }
+    }
+  },
+  "technology": {
+    "processes": {
+      "processInstance": [
+        {
+          "@id": "pi-cell-module",
+          "referenceToProcess": {
+            "@refObjectId": "proc-cell-module",
+            "@version": "00.00.001",
+            "shortDescription": "Cell module assembly"
+          },
+          "connections": {
+            "outputExchange": [
+              {
+                "@id": "edge-cell-to-pack",
+                "downstreamProcess": {
+                  "@refObjectId": "pi-pack-assembly"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "@id": "pi-pack-assembly",
+          "referenceToProcess": {
+            "@refObjectId": "proc-pack-assembly",
+            "@version": "00.00.001",
+            "shortDescription": "Pack assembly"
+          },
+          "connections": {
+            "outputExchange": []
+          }
+        }
+      ]
+    }
+  },
+  "json_tg": {
+    "submodels": [
+      {
+        "modelId": "lm-demo-bms",
+        "label": "BMS submodel",
+        "resultingProcessId": "proc-demo-bms-secondary"
+      }
+    ]
+  }
+}
