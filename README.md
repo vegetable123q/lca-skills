@@ -6,7 +6,7 @@ Use the `skills` CLI from https://github.com/vercel-labs/skills to install, upda
 
 ## Install the CLI
 ```bash
-npm i skills -g
+npm i skills@latest -g
 ```
 
 ## Install

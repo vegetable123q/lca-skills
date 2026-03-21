@@ -1,0 +1,52 @@
+{
+    "name": "tiangong-lca-skills",
+    "owner": {
+        "name": "Tiangong LCA",
+        "email": "li-nan@tsinghua.edu.cn"
+    },
+    "metadata": {
+        "description": "Tiangong LCA skills for hybrid search, embedding, LCI review/remediation, and process automation across flows, processes, and lifecycle models.",
+        "version": "1.1.0"
+    },
+    "plugins": [
+        {
+            "name": "lca-hybrid-search",
+            "description": "Hybrid search edge functions for flows, processes, and lifecycle models with query rewrite, filters, and RPC troubleshooting.",
+            "source": "./",
+            "strict": false,
+            "skills": [
+                "./flow-hybrid-search",
+                "./process-hybrid-search",
+                "./lifecyclemodel-hybrid-search"
+            ]
+        },
+        {
+            "name": "lca-review-and-remediation",
+            "description": "Lifecycle inventory review plus batch flow remediation and publish workflows with schema and version gating.",
+            "source": "./",
+            "strict": false,
+            "skills": [
+                "./lifecycleinventory-review",
+                "./flow-remediator-publisher"
+            ]
+        },
+        {
+            "name": "lca-process-automation",
+            "description": "End-to-end process_from_flow automation to build ILCD process and source datasets with resume/publish controls.",
+            "source": "./",
+            "strict": false,
+            "skills": [
+                "./process-automated-builder"
+            ]
+        },
+        {
+            "name": "lca-embedding",
+            "description": "Supabase edge embedding_ft worker for PGMQ embedding jobs and SageMaker vector writes to Postgres.",
+            "source": "./",
+            "strict": false,
+            "skills": [
+                "./embedding-ft"
+            ]
+        }
+    ]
+}

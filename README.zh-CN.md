@@ -6,7 +6,7 @@
 
 ## 安装 CLI
 ```bash
-npm i skills -g
+npm i skills@latest -g
 ```
 
 ## 安装
