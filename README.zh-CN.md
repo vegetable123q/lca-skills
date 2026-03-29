@@ -62,5 +62,5 @@ npm i skills@latest -g
 当前约定：
 
 - 本地保留 `tiangong-lca-cli` 仓库
-- 或通过 `TIANGONG_CLI_DIR` 指向该仓库
+- 或通过 `TIANGONG_LCA_CLI_DIR` 指向该仓库
 - skill wrapper 统一委托 `bin/tiangong.js` 执行，而不是继续各自维护一套 `curl` 逻辑
