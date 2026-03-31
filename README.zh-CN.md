@@ -34,7 +34,7 @@ npm i skills@latest -g
   ```
 - 作用域说明:
   - 项目级安装到 `./<agent>/skills/`.
-  - 全局安装到 `~/<agent>/skills/`.
+  - 全局安装到 `skills` CLI 在当前平台解析出的 agent 用户目录。可通过 `npx skills list` 查看 macOS / Linux / Windows 上的实际路径。
 
 ## 安装方式
 - 交互式安装可选:

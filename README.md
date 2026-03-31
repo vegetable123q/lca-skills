@@ -34,7 +34,7 @@ npm i skills@latest -g
   ```
 - Scope notes:
   - Project scope installs into `./<agent>/skills/`.
-  - Global scope installs into `~/<agent>/skills/`.
+  - Global scope installs into the per-agent user skills directory resolved by the `skills` CLI on the current platform. Use `npx skills list` to inspect the exact path on macOS, Linux, or Windows.
 
 ## Install method
 - Interactive installs let you choose:

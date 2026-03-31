@@ -22,5 +22,5 @@
     "retry_delay_seconds": 2.0,
     "process_build_forward_args": []
   },
-  "out_dir": "/tmp/lca-publish-executor-example"
+  "out_dir": "<workspace-temp-dir>/lca-publish-executor-example"
 }

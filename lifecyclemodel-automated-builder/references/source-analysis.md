@@ -25,7 +25,8 @@ Reference repo: `tidas-sdk`
 
 Reference repo: `tidas-tools`
 
-- `validate.py` checks lifecycle model classification hierarchy.
+- Historical upstream note: `tidas-tools` contains a `validate.py` implementation for lifecycle model classification hierarchy checks.
+- Current skill execution must not route callers back into that Python entrypoint. Keep the active path on CLI / SDK-backed validation, and treat any `validate.py` mention here as background context only.
 - Classification still has to pass even if the JSON passes strict `tidas-sdk` validation.
 
 ## Downstream Publish Boundary

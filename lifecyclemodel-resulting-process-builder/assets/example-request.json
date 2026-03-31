@@ -14,7 +14,7 @@
       "projection_source": "lifecyclemodel_resulting_process_builder"
     },
     "attach_graph_snapshot": true,
-    "attach_graph_snapshot_uri": "file:///tmp/example-model-preview.png"
+    "attach_graph_snapshot_uri": "file://<workspace-temp-dir>/example-model-preview.png"
   },
   "process_sources": {
     "process_json_dirs": [

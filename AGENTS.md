@@ -15,9 +15,9 @@
 
 1. 明确 skill 的触发场景与典型用例。
 2. 规划可复用资源（`scripts/`、`references/`、`assets/`）。
-3. 新 skill 优先使用 `init_skill.py` 初始化目录与模板。
+3. 新 skill 直接按 `skill-creator` 规范手工创建目录与模板；不要假设仓库里存在额外的 Python 初始化脚本。
 4. 按规范填写/更新 `SKILL.md` 与资源文件。
-5. 生成或更新 `agents/openai.yaml`（使用官方脚本与 `--interface` 参数）。
+5. 生成或更新真实存在的 `agents/openai.yaml`，并确保它满足仓库校验要求。
 6. 运行 `node scripts/validate-skills.mjs <skill-path>`，修复后直到通过。
 
 ## Skill 文件规范

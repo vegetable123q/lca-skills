@@ -23,6 +23,18 @@ const defaultSkillNames = [
   'lca-publish-executor',
 ];
 
+const removedQuickValidatePattern = new RegExp(String.raw`quick_validate` + String.raw`\.py`, 'u');
+const removedLifecyclemodelReviewPattern = new RegExp(
+  String.raw`run_lifecyclemodel_review` + String.raw`\.py`,
+  'u',
+);
+const removedInitSkillPattern = new RegExp(String.raw`init_skill` + String.raw`\.py`, 'u');
+const undocumentedInterfaceFlagPattern = new RegExp(String.raw`--` + String.raw`interface`, 'u');
+const historicalValidatePyCurrentPathPattern = new RegExp(
+  String.raw`validate` + String.raw`\.py` + String.raw` checks`,
+  'iu',
+);
+
 const docGuards = [
   {
     file: 'process-hybrid-search/references/env.md',
@@ -56,8 +68,8 @@ const docGuards = [
   },
   {
     file: 'lifecycleinventory-review/profiles/lifecyclemodel/README.md',
-    pattern: /run_lifecyclemodel_review\.py/u,
-    message: 'lifecyclemodel profile docs should not reference a future Python review script.',
+    pattern: removedLifecyclemodelReviewPattern,
+    message: 'lifecyclemodel profile docs should not reference a future Python review script filename.',
   },
   {
     file: 'lifecycleinventory-review/profiles/lifecyclemodel/README.md',
@@ -66,8 +78,45 @@ const docGuards = [
   },
   {
     file: 'AGENTS.md',
-    pattern: /quick_validate\.py/u,
-    message: 'AGENTS.md should point at node scripts/validate-skills.mjs instead of quick_validate.py.',
+    pattern: removedQuickValidatePattern,
+    message: 'AGENTS.md should point at node scripts/validate-skills.mjs instead of a removed Python validator.',
+  },
+  {
+    file: 'AGENTS.md',
+    pattern: removedInitSkillPattern,
+    message: 'AGENTS.md should not require a missing Python bootstrap step.',
+  },
+  {
+    file: 'AGENTS.md',
+    pattern: undocumentedInterfaceFlagPattern,
+    message: 'AGENTS.md should require a real agents/openai.yaml file, not an undocumented generator flag.',
+  },
+  {
+    file: 'README.md',
+    pattern: /~\/<agent>\/skills\//u,
+    message: 'README.md should describe global install scope without assuming a Unix home-directory path.',
+  },
+  {
+    file: 'README.zh-CN.md',
+    pattern: /~\/<agent>\/skills\//u,
+    message: 'README.zh-CN.md should describe global install scope without assuming a Unix home-directory path.',
+  },
+  {
+    file: 'lifecyclemodel-automated-builder/references/source-analysis.md',
+    pattern: historicalValidatePyCurrentPathPattern,
+    message:
+      'source-analysis.md should treat the old Python validator as historical context, not as the current execution path.',
+  },
+  {
+    file: 'lca-publish-executor/assets/example-request.json',
+    pattern: /"out_dir": "\/tmp\//u,
+    message: 'lca-publish-executor example request should use a platform-neutral temp directory placeholder.',
+  },
+  {
+    file: 'lifecyclemodel-resulting-process-builder/assets/example-request.json',
+    pattern: /file:\/\/\/tmp\//u,
+    message:
+      'lifecyclemodel-resulting-process-builder example request should use a platform-neutral file URI placeholder.',
   },
 ];
 
@@ -198,7 +247,7 @@ function assertSkillFrontmatter(skillDir) {
   }
 
   const text = readFileSync(skillFile, 'utf8');
-  const frontmatterMatch = text.match(/^---\n([\s\S]*?)\n---/u);
+  const frontmatterMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/u);
   if (!frontmatterMatch) {
     fail(`SKILL.md in ${path.relative(repoRoot, skillDir)} must start with YAML frontmatter.`);
   }
