@@ -94,7 +94,7 @@
       "notes": [
         "Pass one or more skill directories to validate only the touched skills.",
         "If a wrapper contract changes, validate the touched skills in the same working session.",
-        "AI-doc changes should still run the root warning-only ai-doc-lint."
+        "AI-doc changes should still run the repo-local ai-doc-lint workflow or the equivalent local node command."
       ]
     }
   }

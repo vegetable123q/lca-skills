@@ -78,6 +78,7 @@ Route those tasks to:
 
 ## Runtime Facts
 
+- Repo-local AI-doc maintenance is enforced by `.github/workflows/ai-doc-lint.yml` using the vendored `.github/scripts/ai-doc-lint.*` files.
 - This repo is distribution-oriented; each skill should stay a thin wrapper over the unified `tiangong` CLI
 - If a capability is missing, add it to `tiangong-lca-cli` first, then update the skill wrapper here
 - The canonical local validation command is `node scripts/validate-skills.mjs`
