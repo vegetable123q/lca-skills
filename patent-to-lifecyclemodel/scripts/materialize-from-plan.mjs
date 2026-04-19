@@ -62,6 +62,40 @@ if (!planPath || !baseArg) {
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 const base = path.resolve(process.cwd(), baseArg);
 
+function isBlackBoxProcess(proc) {
+  return proc?.black_box === true;
+}
+
+function flowKeysForProcess(proc) {
+  return [
+    ...(proc.inputs || []).map((entry) => entry.flow),
+    ...(proc.outputs || []).map((entry) => entry.flow),
+  ];
+}
+
+function validatePlanContract() {
+  for (const proc of plan.processes || []) {
+    if (!isBlackBoxProcess(proc)) continue;
+    for (const flowKey of flowKeysForProcess(proc)) {
+      const unit = plan.flows?.[flowKey]?.unit;
+      if (unit !== 'item') {
+        console.error(
+          `materialize-from-plan: black-box process ${proc.key} requires unit=item for flow ${flowKey}`,
+        );
+        process.exit(2);
+      }
+    }
+  }
+}
+
+validatePlanContract();
+
+function prefixOnce(prefix, text) {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return prefix.trim();
+  return trimmed.startsWith(prefix) ? trimmed : `${prefix} ${trimmed}`.trim();
+}
+
 function seededUuid(key) {
   if (!seed) return crypto.randomUUID();
   const h = crypto.createHash('sha256').update(`${seed}|${key}`).digest('hex');
@@ -85,13 +119,19 @@ writeJson(path.join(base, 'uuids.json'), uuids);
 (plan.processes || []).forEach((proc, idx) => {
   const refFlowKey = proc.reference_output_flow;
   const refFlow = plan.flows?.[refFlowKey] || {};
+  const blackBoxNote = isBlackBoxProcess(proc)
+    ? prefixOnce(
+        'Black-box process;',
+        'item-based exchanges are used because the source does not disclose defensible material quantities.',
+      )
+    : '';
   const flowFile = {
     flow: {
       name: refFlow.name_en || refFlowKey,
       name_zh: refFlow.name_zh,
       unit: refFlow.unit || 'kg',
       reference_amount: 1,
-      description: proc.comment || '',
+      description: [proc.comment || '', blackBoxNote].filter(Boolean).join(' '),
       source_document: plan.source?.id || '',
     },
     operation: 'produce',
@@ -152,6 +192,13 @@ const sourceUuid = uuids.srcs.patent;
 function buildIlcd(proc) {
   const procUuid = uuids.procs[proc.key];
   const refFlowKey = proc.reference_output_flow;
+  const blackBox = isBlackBoxProcess(proc);
+  const generalComment = blackBox
+    ? prefixOnce('Black-box process.', proc.comment || '')
+    : proc.comment || '';
+  const technologyDescription = blackBox
+    ? `${proc.technology || ''} Black-box note: item-based exchanges are used because the source does not disclose defensible material quantities.`
+    : proc.technology || '';
   let internalCounter = 0;
   const nextId = () => String(internalCounter++);
   const exchange = [];
@@ -218,20 +265,20 @@ function buildIlcd(proc) {
               'common:class': (proc.classification || ['Chemicals and chemical products']).map((c, i) => ({ '@level': String(i), '#text': c })),
             },
           },
-          'common:generalComment': [{ '@xml:lang': 'en', '#text': proc.comment || '' }],
+          'common:generalComment': [{ '@xml:lang': 'en', '#text': generalComment }],
         },
         quantitativeReference: { '@type': 'Reference flow(s)', referenceToReferenceFlow: refInternalId },
         time: { 'common:referenceYear': String(plan.reference_year || ''), 'common:dataSetValidUntil': '2030' },
         geography: { locationOfOperationSupplyOrProduction: { '@location': plan.geography || '' } },
-        technology: { technologyDescriptionAndIncludedProcesses: [{ '@xml:lang': 'en', '#text': proc.technology || '' }] },
+        technology: { technologyDescriptionAndIncludedProcesses: [{ '@xml:lang': 'en', '#text': technologyDescription }] },
       },
       modellingAndValidation: {
         LCIMethodAndAllocation: {
           typeOfDataSet: 'Unit process, single operation',
           LCIMethodPrinciple: 'Attributional',
-          deviationsFromLCIMethodPrinciple: [{ '@xml:lang': 'en', '#text': 'None' }],
+          deviationsFromLCIMethodPrinciple: [{ '@xml:lang': 'en', '#text': blackBox ? 'Black-box process; item-based exchanges used because quantitative material inputs are not disclosed.' : 'None' }],
           LCIMethodApproaches: ['Allocation - mass'],
-          deviationsFromLCIMethodApproaches: [{ '@xml:lang': 'en', '#text': 'None' }],
+          deviationsFromLCIMethodApproaches: [{ '@xml:lang': 'en', '#text': blackBox ? 'Black-box process; do not interpret item-based exchanges as mass-balanced inventory.' : 'None' }],
         },
         dataSourcesTreatmentAndRepresentativeness: {
           referenceToDataSource: [{

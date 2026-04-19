@@ -46,6 +46,10 @@ Every item below was actually hit while building `output/CN110980817B/`. Read th
 
 The patent text rarely specifies per-kg-of-product amounts — it gives batch recipes ("weigh 3.10 kg NCM…") and ranges ("15-40 h"). Author with `"dataDerivationTypeStatus": "Estimated"` and note any unit conversions. Do not mark `"Measured"` unless the source really supplies per-functional-unit numbers.
 
+## 6a. Truly missing inputs should become `item`, not fake kilograms
+
+If a process is clearly present in the source but the material input quantities are not defensible even as normalized estimates, do not invent a kilogram inventory. Mark the process with `"black_box": true`, switch every flow used by that process to `unit: "item"`, and explain why in `comment`.
+
 ## 7. `data/` is gitignored
 
 The source patent lives in `data/`, which is in `.gitignore`. That's fine — the `output/<SOURCE>/` directory carries the full audit trail (flows + scaffolds + datasets + manifests). `output/` is also gitignored; if you want to share a run, archive the folder or publish via `lca-publish-executor`.

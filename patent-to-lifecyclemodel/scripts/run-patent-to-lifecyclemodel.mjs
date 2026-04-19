@@ -6,8 +6,9 @@
 // Modes:
 //   1. Plan-driven (preferred — minimises LLM work):
 //        --plan <plan.json>  --base <output/SOURCE>
-//      runs materialize-from-plan (Stages 1, 3, 4), then Stage 5, then
-//      auto-generates orchestrator-request.json, then Stage 6.
+//      first normalizes the plan, then runs materialize-from-plan (Stages 1,
+//      3, 4), then Stage 5, then auto-generates orchestrator-request.json,
+//      then Stage 6.
 //
 //   2. Manual (when flows/ + runs/combined/ + orchestrator-request.json are
 //      already authored):
@@ -68,9 +69,16 @@ function run(label, args) {
   return res;
 }
 
-// ---------- Optional Stage 1/3/4: plan-driven materialization ----------
+// ---------- Optional normalize + Stage 1/3/4: plan-driven materialization ----------
+const normalizePlanScript = path.join(skillDir, 'scripts', 'normalize-plan.mjs');
 const materializeScript = path.join(skillDir, 'scripts', 'materialize-from-plan.mjs');
 if (planPath) {
+  run('normalize-plan', [
+    normalizePlanScript,
+    '--plan', path.resolve(process.cwd(), planPath),
+    '--write',
+    '--json',
+  ]);
   run('materialize-from-plan', [
     materializeScript,
     '--plan', path.resolve(process.cwd(), planPath),
