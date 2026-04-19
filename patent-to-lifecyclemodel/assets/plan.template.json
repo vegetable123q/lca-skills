@@ -13,7 +13,7 @@
   "geography": "CN",
   "reference_year": "2019",
   "flows": {
-    "<flow_key>": {"name_en": "<English>", "name_zh": "<Chinese (optional)>", "unit": "kg"}
+    "<flow_key>": {"name_en": "<English>", "name_zh": "<Chinese (optional)>", "unit": "kg|item"}
   },
   "processes": [
     {
@@ -25,6 +25,7 @@
       "scale": "<lab / pilot / industrial>",
       "technology": "<1-3 sentences, quote source where possible>",
       "comment": "<general comment, 1-3 sentences>",
+      "black_box": false,
       "reference_output_flow": "<flow_key that is the reference product OUT>",
       "inputs": [
         {"flow": "<flow_key>", "amount": 0.0, "derivation": "Measured|Estimated"}
@@ -39,6 +40,7 @@
     "Use the SAME flow_key across processes to create edges (upstream OUTPUT key == downstream INPUT key).",
     "Every process must have exactly one output whose flow equals reference_output_flow; that is the reference exchange.",
     "Amounts are per 1 unit of the process's reference output.",
+    "If a process is black_box=true because material quantities are not defensible, every flow used by that process must use unit=item and the exchange amounts should usually stay at 1 item unless the source gives an explicit item count.",
     "Omit _comment and _rules in the actual plan; they are illustrative only."
   ]
 }
