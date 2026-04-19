@@ -34,6 +34,21 @@ const projectRoot = path.dirname(skillDir);
 const argv = process.argv.slice(2);
 const arg = (f, d = null) => { const i = argv.indexOf(f); return i === -1 ? d : (argv[i + 1] ?? d); };
 
+function printHelp() {
+  console.log(`Usage:
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--seed <seed>] [--json]
+
+Examples:
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --json
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --seed cn111725499b
+`.trim());
+}
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  printHelp();
+  process.exit(0);
+}
+
 const planPath = arg('--plan');
 const baseArg = arg('--base');
 const seed = arg('--seed', '');

@@ -19,6 +19,21 @@ import crypto from 'node:crypto';
 
 const argv = process.argv.slice(2);
 
+function printHelp() {
+  console.log(`Usage:
+  node patent-to-lifecyclemodel/scripts/allocate-uuids.mjs --flows <csv> [--processes <csv>] [--sources <csv>] [--seed <seed>]
+
+Examples:
+  node patent-to-lifecyclemodel/scripts/allocate-uuids.mjs --flows precursor,cathode --processes precursor_proc,cathode_proc
+  node patent-to-lifecyclemodel/scripts/allocate-uuids.mjs --flows precursor,cathode --seed cn111725499b
+`.trim());
+}
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  printHelp();
+  process.exit(0);
+}
+
 function parseArg(flag, def = '') {
   const i = argv.indexOf(flag);
   if (i === -1) return def;

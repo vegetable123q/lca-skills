@@ -30,6 +30,21 @@ const argv = process.argv.slice(2);
 const arg = (f, d = null) => { const i = argv.indexOf(f); return i === -1 ? d : (argv[i + 1] ?? d); };
 const has = (f) => argv.includes(f);
 
+function printHelp() {
+  console.log(`Usage:
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--stage5-only|--stage6-only|--all] [--json]
+
+Examples:
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --json
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --stage5-only --json
+`.trim());
+}
+
+if (has('--help') || has('-h')) {
+  printHelp();
+  process.exit(0);
+}
+
 const baseArg = arg('--base');
 if (!baseArg) { console.error('run-patent-to-lifecyclemodel: --base is required'); process.exit(2); }
 const base = path.resolve(process.cwd(), baseArg);
