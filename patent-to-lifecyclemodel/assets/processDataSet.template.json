@@ -1,0 +1,114 @@
+{
+  "_template_comment": "Minimum ILCD processDataSet accepted by `tiangong lifecyclemodel auto-build`. All <PLACEHOLDER> values must be replaced. Exchange @dataSetInternalID values must be unique within this dataset. referenceToReferenceFlow must equal the @dataSetInternalID of the reference-product OUTPUT exchange. All referenceToFlowDataSet.@refObjectId values should come from the shared uuids.json so upstream-output UUIDs match downstream-input UUIDs.",
+  "processDataSet": {
+    "@xmlns": "http://lca.jrc.it/ILCD/Process",
+    "@xmlns:common": "http://lca.jrc.it/ILCD/Common",
+    "@version": "1.1",
+    "processInformation": {
+      "dataSetInformation": {
+        "common:UUID": "<PROCESS_UUID>",
+        "name": {
+          "baseName": [
+            {"@xml:lang": "en", "#text": "<process name EN>"},
+            {"@xml:lang": "zh", "#text": "<process name ZH>"}
+          ],
+          "mixAndLocationTypes": [
+            {"@xml:lang": "en", "#text": "<location / scale>"}
+          ]
+        },
+        "classificationInformation": {
+          "common:classification": {
+            "common:class": [
+              {"@level": "0", "#text": "<top-level class>"}
+            ]
+          }
+        },
+        "common:generalComment": [
+          {"@xml:lang": "en", "#text": "<2-4 sentence summary quoting the source step>"}
+        ]
+      },
+      "quantitativeReference": {
+        "@type": "Reference flow(s)",
+        "referenceToReferenceFlow": "<@dataSetInternalID of the reference-product output exchange>"
+      },
+      "time": {
+        "common:referenceYear": "<YYYY>",
+        "common:dataSetValidUntil": "<YYYY>"
+      },
+      "geography": {
+        "locationOfOperationSupplyOrProduction": {
+          "@location": "<ISO country code>"
+        }
+      },
+      "technology": {
+        "technologyDescriptionAndIncludedProcesses": [
+          {"@xml:lang": "en", "#text": "<technology description>"}
+        ]
+      }
+    },
+    "modellingAndValidation": {
+      "LCIMethodAndAllocation": {
+        "typeOfDataSet": "Unit process, single operation",
+        "LCIMethodPrinciple": "Attributional",
+        "deviationsFromLCIMethodPrinciple": [{"@xml:lang": "en", "#text": "None"}],
+        "LCIMethodApproaches": ["Allocation - mass"],
+        "deviationsFromLCIMethodApproaches": [{"@xml:lang": "en", "#text": "None"}]
+      },
+      "dataSourcesTreatmentAndRepresentativeness": {
+        "referenceToDataSource": [
+          {
+            "@type": "source data set",
+            "@refObjectId": "<SOURCE_UUID>",
+            "@version": "01.00.000",
+            "@uri": "<source citation, e.g. patent id>",
+            "common:shortDescription": [{"@xml:lang": "en", "#text": "<short citation>"}]
+          }
+        ]
+      }
+    },
+    "administrativeInformation": {
+      "dataEntryBy": {
+        "common:timeStamp": "<ISO timestamp>"
+      },
+      "publicationAndOwnership": {
+        "common:dataSetVersion": "00.00.001",
+        "common:referenceToOwnershipOfDataSet": {
+          "@refObjectId": "<SOURCE_UUID>",
+          "@type": "contact data set",
+          "@version": "01.00.000",
+          "common:shortDescription": [{"@xml:lang": "en", "#text": "<owner / assignee>"}]
+        }
+      }
+    },
+    "exchanges": {
+      "exchange": [
+        {
+          "@dataSetInternalID": "0",
+          "referenceToFlowDataSet": {
+            "@type": "flow data set",
+            "@refObjectId": "<UPSTREAM_OR_RAW_INPUT_FLOW_UUID>",
+            "@version": "01.00.000",
+            "common:shortDescription": [{"@xml:lang": "en", "#text": "<input flow name>"}]
+          },
+          "exchangeDirection": "Input",
+          "meanAmount": 0,
+          "resultingAmount": 0,
+          "dataDerivationTypeStatus": "Estimated"
+        },
+        {
+          "@dataSetInternalID": "1",
+          "referenceToFlowDataSet": {
+            "@type": "flow data set",
+            "@refObjectId": "<REFERENCE_PRODUCT_FLOW_UUID>",
+            "@version": "01.00.000",
+            "common:shortDescription": [{"@xml:lang": "en", "#text": "<reference product name>"}]
+          },
+          "exchangeDirection": "Output",
+          "meanAmount": 1,
+          "resultingAmount": 1,
+          "dataDerivationTypeStatus": "Measured"
+        }
+      ]
+    }
+  }
+}

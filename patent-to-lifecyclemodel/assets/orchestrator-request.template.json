@@ -1,0 +1,74 @@
+{
+  "request_id": "<source-slug>-orchestration-001",
+  "goal": {
+    "name": "<reference product name>",
+    "functional_unit": {"amount": 1, "unit": "kg"},
+    "boundary": "cradle-to-gate; <short scope>"
+  },
+  "root": {
+    "node_id": "<source-slug>-model",
+    "kind": "lifecyclemodel",
+    "lifecyclemodel": {
+      "id": "<MODEL_UUID from lifecyclemodel-run summary>",
+      "version": "01.01.000",
+      "name": "<model name>"
+    },
+    "requested_action": "build_submodel",
+    "depends_on": ["<first-process-node-id>", "<second-process-node-id>"],
+    "submodel_builder": {
+      "manifest": "<ABSOLUTE path to lifecyclemodel-manifest.json>"
+    },
+    "projector": {
+      "command": "build",
+      "model_file": "<ABSOLUTE path to lifecyclemodel-run/models/combined/tidas_bundle/lifecyclemodels/<MODEL_UUID>_01.01.000.json>",
+      "projection_role": "primary"
+    }
+  },
+  "orchestration": {
+    "mode": "expanded",
+    "max_depth": 3,
+    "reuse_resulting_process_first": false,
+    "allow_process_build": true,
+    "allow_submodel_build": true,
+    "pin_child_versions": true,
+    "stop_at_elementary_flow": false,
+    "cutoff_policy": "default",
+    "fail_fast": false
+  },
+  "candidate_sources": {
+    "my_processes": false,
+    "team_processes": false,
+    "public_processes": false,
+    "existing_lifecyclemodels": false,
+    "existing_resulting_processes": false
+  },
+  "nodes": [
+    {
+      "node_id": "<first-process-node-id>",
+      "kind": "process",
+      "label": "<label>",
+      "requested_action": "build_process",
+      "process": {
+        "id": "<process UUID>",
+        "version": "00.00.001",
+        "name": "<process name>"
+      },
+      "process_builder": {
+        "flow_file": "<ABSOLUTE path to flows/<NN>-<layer>.json>"
+      }
+    }
+  ],
+  "edges": [
+    {"from": "<upstream-node-id>", "to": "<downstream-node-id>", "relation": "<upstream supplies downstream>"}
+  ],
+  "publish": {
+    "intent": "prepare_only",
+    "prepare_lifecyclemodel_payload": true,
+    "prepare_resulting_process_payload": true,
+    "prepare_relation_payload": true
+  },
+  "notes": [
+    "Source document: <citation>",
+    "All exchange amounts are initial estimates; refine before real publish."
+  ]
+}
