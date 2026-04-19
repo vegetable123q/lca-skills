@@ -1,0 +1,36 @@
+{
+  "flow": {
+    "name": "<reference product name, English>",
+    "name_zh": "<reference product name, Chinese (optional)>",
+    "unit": "kg",
+    "reference_amount": 1,
+    "description": "<1-3 sentences describing the reference product and how it is produced, quoting the source doc where possible>",
+    "source_document": "<patent id or paper citation>"
+  },
+  "operation": "produce",
+  "process": {
+    "name": "<process name, e.g. 'MOFs template synthesis (microwave, 120 C, 2 h)'>",
+    "type": "unit process",
+    "technology": {
+      "description": "<technology description, quoting the source doc>"
+    },
+    "inputs": [
+      {"name": "<material>", "name_zh": "<中文>", "role": "raw material"},
+      {"name": "<intermediate from upstream>", "role": "intermediate", "links_to_upstream": "<upstream_flow_key from uuids.json>"}
+    ],
+    "outputs": [
+      {"name": "<reference product>", "role": "reference product", "amount": 1, "unit": "kg"},
+      {"name": "<waste>", "role": "waste"}
+    ],
+    "reaction_conditions": {
+      "temperature_c": 0,
+      "time_h": 0,
+      "other_parameters": ""
+    }
+  },
+  "references": {
+    "patent_id": "<patent id>",
+    "step_id": "<S1 / S2 / ... as described in the source document>",
+    "upstream_links": []
+  }
+}

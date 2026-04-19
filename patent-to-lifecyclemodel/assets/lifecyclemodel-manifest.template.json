@@ -1,0 +1,19 @@
+{
+  "run_label": "<SOURCE>-lifecyclemodel",
+  "allow_remote_write": false,
+  "selection": {
+    "mode": "graph_first_local_inference",
+    "max_models": 1,
+    "max_processes_per_model": 12,
+    "decision_factors": [
+      "<one sentence per layer, e.g. 'S1 MOFs feeds S2 NCM via shared flow UUID'>"
+    ]
+  },
+  "output": {
+    "write_local_models": true,
+    "emit_validation_report": true
+  },
+  "local_runs": [
+    "<ABSOLUTE path to output/<SOURCE>/runs/combined>"
+  ]
+}

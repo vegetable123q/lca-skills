@@ -1,0 +1,44 @@
+{
+  "_comment": "Compact plan authored by the LLM from ONE pass over the source document. Everything else is generated from this file.",
+  "source": {
+    "id": "<PATENT-ID or paper citation>",
+    "title": "<short title>",
+    "assignee": "<owner / author (optional)>"
+  },
+  "goal": {
+    "name": "<reference-product name>",
+    "functional_unit": {"amount": 1, "unit": "kg"},
+    "boundary": "cradle-to-gate; <short scope>"
+  },
+  "geography": "CN",
+  "reference_year": "2019",
+  "flows": {
+    "<flow_key>": {"name_en": "<English>", "name_zh": "<Chinese (optional)>", "unit": "kg"}
+  },
+  "processes": [
+    {
+      "key": "<proc_key, e.g. mofs_proc>",
+      "step_id": "S1",
+      "name_en": "<process name>",
+      "name_zh": "<process name ZH (optional)>",
+      "classification": ["Chemicals and chemical products"],
+      "scale": "<lab / pilot / industrial>",
+      "technology": "<1-3 sentences, quote source where possible>",
+      "comment": "<general comment, 1-3 sentences>",
+      "reference_output_flow": "<flow_key that is the reference product OUT>",
+      "inputs": [
+        {"flow": "<flow_key>", "amount": 0.0, "derivation": "Measured|Estimated"}
+      ],
+      "outputs": [
+        {"flow": "<flow_key>", "amount": 1, "derivation": "Measured"},
+        {"flow": "<waste-flow_key>", "amount": 0.0, "derivation": "Estimated"}
+      ]
+    }
+  ],
+  "_rules": [
+    "Use the SAME flow_key across processes to create edges (upstream OUTPUT key == downstream INPUT key).",
+    "Every process must have exactly one output whose flow equals reference_output_flow; that is the reference exchange.",
+    "Amounts are per 1 unit of the process's reference output.",
+    "Omit _comment and _rules in the actual plan; they are illustrative only."
+  ]
+}
