@@ -48,8 +48,19 @@ function fail(message) {
 
 function normalizeDerivation(value, fallback) {
   const normalized = String(value || fallback || '').trim();
-  if (normalized === 'Measured' || normalized === 'Estimated') return normalized;
+  if (normalized === 'Measured' || normalized === 'Estimated' || normalized === 'Calculated') {
+    return normalized;
+  }
   return fallback;
+}
+
+const MISSING_DATA_PREFIX = 'Missing important data:';
+const BLACK_BOX_PREFIX = 'Black-box process.';
+
+function prefixOnce(prefix, text) {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return prefix;
+  return trimmed.startsWith(prefix) ? trimmed : `${prefix} ${trimmed}`.trim();
 }
 
 if (!plan.source?.id) fail('source.id is required');
@@ -66,6 +77,7 @@ const referencedFlowKeys = new Set();
 
 for (const proc of plan.processes) {
   proc.black_box = proc.black_box === true;
+  proc.pure_oxygen = proc.pure_oxygen === true;
   proc.inputs = Array.isArray(proc.inputs) ? proc.inputs : [];
   proc.outputs = Array.isArray(proc.outputs) ? proc.outputs : [];
   proc.classification = Array.isArray(proc.classification) && proc.classification.length
@@ -79,27 +91,40 @@ for (const proc of plan.processes) {
     fail(`process ${proc.key || '<unknown>'} is missing reference_output_flow`);
   }
 
-  for (const input of proc.inputs) {
-    if (!input.flow) fail(`process ${proc.key} has an input without flow`);
-    input.derivation = normalizeDerivation(input.derivation, 'Estimated');
-    if (typeof input.amount !== 'number') input.amount = Number(input.amount ?? 0);
-    referencedFlowKeys.add(input.flow);
-  }
+  const validateExchange = (entry, direction) => {
+    if (!entry.flow) fail(`process ${proc.key} has an ${direction} without flow`);
+    const fallbackDerivation =
+      direction === 'output' && entry.flow === proc.reference_output_flow ? 'Measured' : 'Estimated';
+    entry.derivation = normalizeDerivation(entry.derivation, fallbackDerivation);
+    if (typeof entry.amount !== 'number') entry.amount = Number(entry.amount ?? 0);
+    if (entry.derivation === 'Calculated') {
+      const note = String(entry.calc_note ?? '').trim();
+      if (!note) {
+        fail(`process ${proc.key} ${direction} flow=${entry.flow} has derivation=Calculated but no calc_note`);
+      }
+      entry.calc_note = note;
+    }
+    referencedFlowKeys.add(entry.flow);
+  };
 
+  for (const input of proc.inputs) validateExchange(input, 'input');
   let hasReferenceOutput = false;
   for (const output of proc.outputs) {
-    if (!output.flow) fail(`process ${proc.key} has an output without flow`);
-    output.derivation = normalizeDerivation(
-      output.derivation,
-      output.flow === proc.reference_output_flow ? 'Measured' : 'Estimated',
-    );
-    if (typeof output.amount !== 'number') output.amount = Number(output.amount ?? 0);
+    validateExchange(output, 'output');
     if (output.flow === proc.reference_output_flow) hasReferenceOutput = true;
-    referencedFlowKeys.add(output.flow);
   }
 
   if (!hasReferenceOutput) {
     fail(`process ${proc.key} has no output matching reference_output_flow=${proc.reference_output_flow}`);
+  }
+
+  // Rule: O2 may only appear when pure_oxygen is declared.
+  const hasO2Input = proc.inputs.some((entry) => /\bo2\b|oxygen/i.test(entry.flow));
+  if (hasO2Input && !proc.pure_oxygen) {
+    fail(
+      `process ${proc.key} lists an O2 input but pure_oxygen!=true. ` +
+      'Either set pure_oxygen:true (only if source specifies pure-O2 atmosphere) or remove the O2 exchange.',
+    );
   }
 
   if (proc.black_box) {
@@ -114,9 +139,29 @@ for (const proc of plan.processes) {
         fail(`black-box process ${proc.key} requires unit=item for flow ${flowKey}`);
       }
     }
-    if (!/black-box/iu.test(proc.comment)) {
-      proc.comment = `Black-box process. ${proc.comment}`.trim();
+    proc.comment = prefixOnce(BLACK_BOX_PREFIX, proc.comment);
+    proc.comment = prefixOnce(MISSING_DATA_PREFIX, proc.comment);
+  }
+}
+
+// Rule: any flow with unit=item globally enforces amount=1 in every exchange
+// that references it, regardless of which process owns that exchange. This
+// propagates black-box semantics to downstream consumers.
+for (const proc of plan.processes) {
+  for (const entry of [...proc.inputs, ...proc.outputs]) {
+    const flow = plan.flows[entry.flow];
+    if (flow?.unit === 'item' && entry.amount !== 1) {
+      fail(
+        `process ${proc.key} exchange for flow=${entry.flow} has amount=${entry.amount} but unit=item requires amount=1`,
+      );
     }
+  }
+  // Processes consuming any item-unit flow inherit the missing-data marker.
+  const consumesItem = [...proc.inputs, ...proc.outputs].some(
+    (entry) => plan.flows[entry.flow]?.unit === 'item',
+  );
+  if (consumesItem && !proc.comment.includes(MISSING_DATA_PREFIX)) {
+    proc.comment = prefixOnce(MISSING_DATA_PREFIX, proc.comment);
   }
 }
 
@@ -124,6 +169,27 @@ for (const flowKey of referencedFlowKeys) {
   const flow = plan.flows[flowKey];
   if (!flow) fail(`missing flow definition for ${flowKey}`);
   flow.unit ||= 'kg';
+}
+
+// Rule: canonical_flow_key + conversion_factor. If a flow declares a canonical
+// form (e.g. anhydrous version of a hydrate that already exists in the DB),
+// both flows must exist in plan.flows and the conversion_factor must be a
+// positive number. Materialize-from-plan swaps the exchange at write time.
+for (const [flowKey, flow] of Object.entries(plan.flows)) {
+  if (flow.canonical_flow_key == null) continue;
+  const target = plan.flows[flow.canonical_flow_key];
+  if (!target) {
+    fail(`flow ${flowKey} canonical_flow_key=${flow.canonical_flow_key} not found in plan.flows`);
+  }
+  if (flow.unit !== target.unit) {
+    fail(
+      `flow ${flowKey} (unit=${flow.unit}) canonical_flow_key=${flow.canonical_flow_key} ` +
+      `(unit=${target.unit}): units must match`,
+    );
+  }
+  if (typeof flow.conversion_factor !== 'number' || !(flow.conversion_factor > 0)) {
+    fail(`flow ${flowKey} has canonical_flow_key but conversion_factor is missing or non-positive`);
+  }
 }
 
 if (write) {
@@ -137,6 +203,12 @@ const summary = {
   process_count: plan.processes.length,
   flow_count: Object.keys(plan.flows).length,
   black_box_processes: plan.processes.filter((proc) => proc.black_box).map((proc) => proc.key),
+  pure_oxygen_processes: plan.processes.filter((proc) => proc.pure_oxygen).map((proc) => proc.key),
+  canonical_aliases: Object.fromEntries(
+    Object.entries(plan.flows)
+      .filter(([, flow]) => flow.canonical_flow_key)
+      .map(([key, flow]) => [key, { canonical: flow.canonical_flow_key, factor: flow.conversion_factor }]),
+  ),
 };
 
 process.stdout.write(

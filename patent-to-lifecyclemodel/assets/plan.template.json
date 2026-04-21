@@ -13,7 +13,13 @@
   "geography": "CN",
   "reference_year": "2019",
   "flows": {
-    "<flow_key>": {"name_en": "<English>", "name_zh": "<Chinese (optional)>", "unit": "kg|item"}
+    "<flow_key>": {
+      "name_en": "<English>",
+      "name_zh": "<Chinese (optional)>",
+      "unit": "kg|item",
+      "canonical_flow_key": "<optional: another flow_key in this map to emit instead (e.g. anhydrous form)>",
+      "conversion_factor": 1.0
+    }
   },
   "processes": [
     {
@@ -26,9 +32,10 @@
       "technology": "<1-3 sentences, quote source where possible>",
       "comment": "<general comment, 1-3 sentences>",
       "black_box": false,
+      "pure_oxygen": false,
       "reference_output_flow": "<flow_key that is the reference product OUT>",
       "inputs": [
-        {"flow": "<flow_key>", "amount": 0.0, "derivation": "Measured|Estimated"}
+        {"flow": "<flow_key>", "amount": 0.0, "derivation": "Measured|Calculated|Estimated", "calc_note": "<required iff derivation=Calculated>"}
       ],
       "outputs": [
         {"flow": "<flow_key>", "amount": 1, "derivation": "Measured"},
@@ -40,7 +47,10 @@
     "Use the SAME flow_key across processes to create edges (upstream OUTPUT key == downstream INPUT key).",
     "Every process must have exactly one output whose flow equals reference_output_flow; that is the reference exchange.",
     "Amounts are per 1 unit of the process's reference output.",
-    "If a process is black_box=true because material quantities are not defensible, every flow used by that process must use unit=item and the exchange amounts should usually stay at 1 item unless the source gives an explicit item count.",
+    "derivation=Measured: the source text gives this exact quantity. derivation=Calculated: derived from source-given molar ratios/formulas/recipe fractions — MUST supply calc_note. derivation=Estimated: defaulted from engineering models (electricity/water/O2 should come from estimate-utilities.mjs).",
+    "If a process is black_box=true because material quantities are not defensible, every flow used by that process must use unit=item and every exchange amount must be 1. Downstream processes consuming an item-unit flow inherit that item-based treatment.",
+    "pure_oxygen=true is required to declare any O2 input (flow key containing 'o2' or 'oxygen'). Only set it when the source explicitly names a pure-O2 atmosphere.",
+    "canonical_flow_key lets a flow (e.g. 'coso4_7h2o' hydrate) emit as another flow (e.g. 'coso4' anhydrous) with amount multiplied by conversion_factor (e.g. 154.99/281.10 ≈ 0.551). Both flows must be declared in this flows{} map; the canonical one is the form that actually enters the ILCD dataset.",
     "Omit _comment and _rules in the actual plan; they are illustrative only."
   ]
 }
