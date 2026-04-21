@@ -72,8 +72,6 @@ rm -rf output/<SOURCE>/{artifacts,lifecyclemodel-run,orchestrator-run}
 
 Authored inputs (`flows/`, `runs/combined/exports/processes/`, `manifests/`, `uuids.json`, `orchestrator-request.json`) are preserved.
 
-## 10. Do not back-compute reagents from a coated / composite final product MW
-
 **Symptom:** you divide `1 kg` of the functional unit by the MW of the pure parent phase (e.g. `LiNi0.8Co0.1Mn0.1O2 = 97.28 g/mol`) to get upstream reagent moles, and the numbers end up 2–10% off with no clear reason.
 
 **Root cause:** the functional-unit product often carries a coating (B₂O₃, Al₂O₃), dopant, or binder. It is not a single pure phase, so it does not have a single MW. Any stoichiometry done on it is mass-balance-wrong by the coating fraction.
