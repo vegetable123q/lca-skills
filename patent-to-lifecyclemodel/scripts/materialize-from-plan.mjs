@@ -205,40 +205,55 @@ function buildIlcd(proc) {
   // inputs first, outputs second; refOutput internal id noted
   let refInternalId = null;
 
-  (proc.inputs || []).forEach((x) => {
-    const flow = plan.flows[x.flow] || {};
-    exchange.push({
-      '@dataSetInternalID': nextId(),
-      referenceToFlowDataSet: {
-        '@type': 'flow data set',
-        '@refObjectId': uuids.flows[x.flow],
-        '@version': '01.00.000',
-        'common:shortDescription': [{ '@xml:lang': 'en', '#text': flow.name_en || x.flow }],
-      },
-      exchangeDirection: 'Input',
-      meanAmount: x.amount ?? 0,
-      resultingAmount: x.amount ?? 0,
-      dataDerivationTypeStatus: x.derivation || 'Estimated',
-    });
-  });
-  (proc.outputs || []).forEach((x) => {
-    const flow = plan.flows[x.flow] || {};
+  // Resolve canonical alias (hydrate → anhydrous etc.). Returns the flow_key
+  // whose UUID/name should actually appear in the ILCD exchange plus the
+  // conversion factor used to scale the declared amount.
+  const resolveCanonical = (flowKey) => {
+    const flow = plan.flows[flowKey] || {};
+    if (!flow.canonical_flow_key) return { targetKey: flowKey, factor: 1, sourceFlow: flow };
+    return {
+      targetKey: flow.canonical_flow_key,
+      factor: Number(flow.conversion_factor) || 1,
+      sourceFlow: flow,
+    };
+  };
+
+  const buildExchange = (x, direction) => {
+    const { targetKey, factor, sourceFlow } = resolveCanonical(x.flow);
+    const targetFlow = plan.flows[targetKey] || {};
+    const amount = (x.amount ?? 0) * factor;
     const id = nextId();
-    if (x.flow === refFlowKey) refInternalId = id;
-    exchange.push({
+    if (direction === 'Output' && x.flow === refFlowKey) refInternalId = id;
+    const commentBits = [];
+    if (targetKey !== x.flow) {
+      commentBits.push(
+        `converted from ${sourceFlow.name_en || x.flow} via factor ${factor}`,
+      );
+    }
+    if (x.derivation === 'Calculated' && x.calc_note) {
+      commentBits.push(`calc_note: ${x.calc_note}`);
+    }
+    const exch = {
       '@dataSetInternalID': id,
       referenceToFlowDataSet: {
         '@type': 'flow data set',
-        '@refObjectId': uuids.flows[x.flow],
+        '@refObjectId': uuids.flows[targetKey],
         '@version': '01.00.000',
-        'common:shortDescription': [{ '@xml:lang': 'en', '#text': flow.name_en || x.flow }],
+        'common:shortDescription': [{ '@xml:lang': 'en', '#text': targetFlow.name_en || targetKey }],
       },
-      exchangeDirection: 'Output',
-      meanAmount: x.amount ?? 0,
-      resultingAmount: x.amount ?? 0,
-      dataDerivationTypeStatus: x.derivation || 'Measured',
-    });
-  });
+      exchangeDirection: direction,
+      meanAmount: amount,
+      resultingAmount: amount,
+      dataDerivationTypeStatus: x.derivation || (direction === 'Output' ? 'Measured' : 'Estimated'),
+    };
+    if (commentBits.length) {
+      exch['common:generalComment'] = [{ '@xml:lang': 'en', '#text': commentBits.join('; ') }];
+    }
+    return exch;
+  };
+
+  (proc.inputs || []).forEach((x) => exchange.push(buildExchange(x, 'Input')));
+  (proc.outputs || []).forEach((x) => exchange.push(buildExchange(x, 'Output')));
 
   if (refInternalId === null) {
     console.error(`materialize-from-plan: process ${proc.key} has no output matching reference_output_flow=${refFlowKey}`);

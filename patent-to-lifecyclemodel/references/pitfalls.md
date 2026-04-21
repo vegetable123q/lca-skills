@@ -71,3 +71,19 @@ rm -rf output/<SOURCE>/{artifacts,lifecyclemodel-run,orchestrator-run}
 ```
 
 Authored inputs (`flows/`, `runs/combined/exports/processes/`, `manifests/`, `uuids.json`, `orchestrator-request.json`) are preserved.
+
+## 10. Do not back-compute reagents from a coated / composite final product MW
+
+**Symptom:** you divide `1 kg` of the functional unit by the MW of the pure parent phase (e.g. `LiNi0.8Co0.1Mn0.1O2 = 97.28 g/mol`) to get upstream reagent moles, and the numbers end up 2–10% off with no clear reason.
+
+**Root cause:** the functional-unit product often carries a coating (B₂O₃, Al₂O₃), dopant, or binder. It is not a single pure phase, so it does not have a single MW. Any stoichiometry done on it is mass-balance-wrong by the coating fraction.
+
+**Fix:** run stoichiometry on the **last uncoated intermediate** (e.g. the NCM matrix before boric-acid coating), then mass-balance the coating mass separately. For CN110980817B this means: S2 reagents are sized per kg of `Ni0.8Co0.1Mn0.1O2` (MW 90.34) and S3's NCM input is `1 kg cathode − m_coating` kg of the matrix; the coating (H₃BO₃ → B₂O₃) goes in its own exchange.
+
+## 11. Do not invent utility numbers — call `estimate-utilities.mjs`
+
+**Symptom:** one run says electricity = 18 kWh/kg, another similar process says 9 kWh/kg, with no defensible basis for the 2× gap.
+
+**Root cause:** LLM guessed kW × h without normalizing to the functional unit or accounting for process type.
+
+**Fix:** call `patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode electricity|water|oxygen` with the patent-reported temperature, time, and batch mass. Copy the returned `kWh_per_kg` / `kg_per_kg` as the exchange amount; copy the `formula_ref` into the process `comment` so reviewers can reproduce the number. Different patents driven by the same estimator are then directly comparable.
