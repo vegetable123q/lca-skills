@@ -1,0 +1,216 @@
+version: 1
+layout: repo
+lastReviewedAt: "2026-05-03"
+lastReviewedCommit: "5004ca88f8c2b7177a90fe696eafaf76d0e813cf"
+
+catalog:
+  repos:
+    - id: skills
+      path: .
+      canonicalRepo: tiangong-lca/skills
+      entryDoc: AGENTS.md
+      workflowDocs:
+        - docs/agents/repo-validation.md
+        - docs/agents/repo-architecture.md
+      workspaceIntegrationRequired: true
+
+ownership:
+  domains:
+    - id: repo-governance-and-docs
+      paths:
+        include:
+          - AGENTS.md
+          - README.md
+          - README.zh-CN.md
+          - .docpact/config.yaml
+          - docs/agents/**
+          - .github/workflows/ai-doc-lint.yml
+      ownerRepo: skills
+    - id: skill-packages
+      paths:
+        include:
+          - "*/SKILL.md"
+          - "*/agents/openai.yaml"
+          - "*/scripts/**"
+          - "*/references/**"
+          - "*/assets/**"
+      ownerRepo: skills
+    - id: validation-and-packaging
+      paths:
+        include:
+          - scripts/validate-skills.mjs
+          - test/**
+      ownerRepo: skills
+
+coverage:
+  include:
+    - AGENTS.md
+    - README.md
+    - README.zh-CN.md
+    - .docpact/config.yaml
+    - docs/agents/**
+    - "*/SKILL.md"
+    - "*/agents/openai.yaml"
+    - "*/scripts/**"
+    - "*/references/**"
+    - "*/assets/**"
+    - scripts/validate-skills.mjs
+    - test/**
+    - .github/workflows/ai-doc-lint.yml
+  exclude:
+    - .git/**
+    - .github/scripts/**
+    - .docpact/runs/**
+    - node_modules/**
+
+freshness:
+  warn_after_commits: 40
+  warn_after_days: 60
+  critical_after_days: 120
+
+routing:
+  intents:
+    skill-wrapper:
+      paths:
+        - "*/SKILL.md"
+        - "*/agents/openai.yaml"
+    skill-package-assets:
+      paths:
+        - "*/scripts/**"
+        - "*/references/**"
+        - "*/assets/**"
+    validation:
+      paths:
+        - scripts/validate-skills.mjs
+        - test/**
+    repo-docs:
+      paths:
+        - AGENTS.md
+        - README.md
+        - README.zh-CN.md
+        - .docpact/config.yaml
+        - docs/agents/**
+        - .github/workflows/ai-doc-lint.yml
+    proof:
+      paths:
+        - docs/agents/repo-validation.md
+        - scripts/validate-skills.mjs
+        - test/**
+    root-integration:
+      paths:
+        - AGENTS.md
+
+docInventory:
+  include:
+    - AGENTS.md
+    - README.md
+    - README.zh-CN.md
+    - .docpact/config.yaml
+    - docs/agents/repo-validation.md
+    - docs/agents/repo-architecture.md
+
+repo:
+  id: skills
+  owner: skills
+
+rules:
+  - id: skills-bootstrap-contract
+    scope: repo
+    repo: skills
+    triggers:
+      - path: AGENTS.md
+        kind: doc-contract
+      - path: .docpact/config.yaml
+        kind: doc-ai-layer
+      - path: docs/agents/repo-validation.md
+        kind: deep-doc
+      - path: docs/agents/repo-architecture.md
+        kind: deep-doc
+      - path: ai/**
+        kind: legacy-doc-ai-layer
+      - path: .github/scripts/ai-doc-lint.mjs
+        kind: legacy-automation
+      - path: .github/scripts/ai-doc-lint.test.mjs
+        kind: legacy-automation
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+    reason: Repo entry guidance, machine-readable routing, retained source docs, and legacy AI-doc removal must stay aligned.
+  - id: skills-readme-contract
+    scope: repo
+    repo: skills
+    triggers:
+      - path: README.md
+        kind: repo-landing
+      - path: README.zh-CN.md
+        kind: repo-landing
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: README.md
+        mode: review_or_update
+      - path: README.zh-CN.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+    reason: User-facing install and usage docs should stay aligned with the repo contract and skill packaging surface.
+  - id: skills-wrapper-contract
+    scope: repo
+    repo: skills
+    triggers:
+      - path: "*/SKILL.md"
+        kind: skill-contract
+      - path: "*/agents/openai.yaml"
+        kind: wrapper-contract
+      - path: "*/scripts/**"
+        kind: skill-script
+      - path: "*/references/**"
+        kind: skill-reference
+      - path: "*/assets/**"
+        kind: skill-asset
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Skill packages are this repo's source of truth and must keep instruction, wrapper, and proof expectations aligned.
+  - id: skills-validation-contract
+    scope: repo
+    repo: skills
+    triggers:
+      - path: scripts/validate-skills.mjs
+        kind: validation-script
+      - path: test/**
+        kind: repo-test
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Validation changes alter the minimum proof expected for future skill work.
+  - id: skills-doc-governance-ci
+    scope: repo
+    repo: skills
+    triggers:
+      - path: .github/workflows/ai-doc-lint.yml
+        kind: automation
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Documentation governance automation changes alter the maintenance gate and proof expectations.

@@ -13,12 +13,13 @@ whenToUse:
 whenToUpdate:
   - when skill packaging rules or validation flow change
   - when repo ownership or CLI boundary rules change
-  - when the repo-local AI bootstrap docs under ai/ change
+  - when repo-local docpact governance or source docs change
 checkPaths:
   - AGENTS.md
   - README.md
   - README.zh-CN.md
-  - ai/**/*.yaml
+  - .docpact/config.yaml
+  - docs/agents/**
   - */SKILL.md
   - */agents/openai.yaml
   - */scripts/**
@@ -27,11 +28,12 @@ checkPaths:
   - scripts/validate-skills.mjs
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-04-18
-lastReviewedCommit: 8a3f25207be167e315acc6fbbccb421a41077f79
+lastReviewedAt: 2026-05-03
+lastReviewedCommit: 5004ca88f8c2b7177a90fe696eafaf76d0e813cf
 related:
-  - ai/repo.yaml
-  - ai/doc-impact.yaml
+  - .docpact/config.yaml
+  - docs/agents/repo-architecture.md
+  - docs/agents/repo-validation.md
   - README.md
   - README.zh-CN.md
   - scripts/validate-skills.mjs
@@ -46,11 +48,12 @@ related:
 Load docs in this order:
 
 1. `AGENTS.md`
-2. `ai/repo.yaml`
-3. `ai/doc-impact.yaml`
-4. `README.md` only when you need install or distribution context
-5. the target skill's `SKILL.md`
-6. `scripts/validate-skills.mjs` only when validation behavior itself is part of the task
+2. `.docpact/config.yaml`
+3. `docs/agents/repo-architecture.md`
+4. `docs/agents/repo-validation.md`
+5. `README.md` only when you need install or distribution context
+6. the target skill's `SKILL.md`
+7. `scripts/validate-skills.mjs` only when validation behavior itself is part of the task
 
 Do not start by inferring behavior from chat history or one skill directory alone.
 
@@ -78,11 +81,12 @@ Route those tasks to:
 
 ## Runtime Facts
 
-- Repo-local AI-doc maintenance is enforced by `.github/workflows/ai-doc-lint.yml` using the vendored `.github/scripts/ai-doc-lint.*` files.
+- Repo-local documentation governance is enforced through `.docpact/config.yaml` and `.github/workflows/ai-doc-lint.yml`.
 - This repo is distribution-oriented; each skill should stay a thin wrapper over the unified `tiangong` CLI
 - If a capability is missing, add it to `tiangong-lca-cli` first, then update the skill wrapper here
 - The canonical local validation command is `node scripts/validate-skills.mjs`
 - You may pass one or more skill paths to validate only the touched skills
+- For documentation-governance changes, run `docpact validate-config --root . --strict` and `docpact lint --root . --base origin/main --head HEAD --mode enforce`
 
 ## Hard Boundaries
 
