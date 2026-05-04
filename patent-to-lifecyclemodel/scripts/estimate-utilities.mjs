@@ -3,9 +3,9 @@
 //
 // Deterministic utility estimators for LCA plan authoring. Given patent-level
 // process conditions (temperature, time, batch mass, reactor type) it returns
-// kWh/kg, kg-water/kg, and kg-O2/kg numbers that are directly usable as
-// `Estimated` exchange amounts in plan.json. The same inputs across different
-// patents therefore produce comparable LCI values.
+// kWh/kg, kg-water/kg, kg-O2/kg, and auxiliary waste/emission factors that are
+// directly usable as `Estimated` exchange amounts in plan.json. The same inputs
+// across different patents therefore produce comparable LCI values.
 //
 // Pure stdin/stdout, no external deps, no side effects. LLM runs this and
 // copies the result JSON (or its kWh_per_kg / kg_per_kg) into the plan along
@@ -15,6 +15,7 @@
 //   node estimate-utilities.mjs --mode electricity --params '<json>'
 //   node estimate-utilities.mjs --mode water       --params '<json>'
 //   node estimate-utilities.mjs --mode oxygen      --params '<json>'
+//   node estimate-utilities.mjs --mode waste       --params '<json>'
 //   node estimate-utilities.mjs --help
 //
 // --------------------------------------------------------------------------
@@ -40,7 +41,11 @@
 //        microwave              0        (use nameplate_kw instead)
 //      Calibration sources: Nabertherm / Carbolite lab-furnace datasheets for
 //      hold-power vs rated-power; Dunn et al. 2015 (ANL) for industrial NCM
-//      calcination SEC ~2–7 kWh/kg; lab-scale expected 5–15 kWh/kg.
+//      calcination SEC ~2-7 kWh/kg; lab-scale expected 5-15 kWh/kg.
+//      EIA auxiliary check, not the primary estimator: Ningxia Zhonghua NCM EIA
+//      structured result `data/EIA/baseline_UPR/csv/utilities.csv` reports
+//      electricity = 133,920,000 kWh/a for 10,000 t/a NCM = 13.392 kWh/kg
+//      as a site-wide plant average, not a unit-process calcination value.
 //    E_stir = P_stir × duration_h                     (only reactors; default 0.3 kW)
 //    For microwave: E_hold = nameplate_kw × duration_h (ignores heat-up).
 //    Per-kg basis: divide by product_mass_kg.
@@ -51,20 +56,37 @@
 //      coprecipitate          5       (remove mother-liquor salts)
 //      post_sinter_rinse      3       (remove residual Li / soluble species)
 //      simple_rinse           1.5     (post-drying rinse)
+//      aqueous_coating_eia_aux 0.96   (EIA auxiliary fallback only: Ningxia
+//                                      Zhonghua 5000 t/a coating line reports
+//                                      4800 m3/a coating wastewater = 0.96 kg/kg)
 //    Wastewater ≈ m_wash (mass balance, ignoring evaporation).
 //
 // 3. Oxygen (pure-O2 only)
 //    Called only when plan process has `pure_oxygen: true`.
 //    V_O2 = flow_Nm3_h × duration_h                   [Nm³]
 //    m_O2 = V_O2 × 1.429                              [kg]   (O2 density @ STP)
-//    flow_Nm3_h default: 0.5 × furnace_volume_m3     (i.e. 0.5 furnace-volume turnovers per hour)
+//    If the patent gives flow_Nm3_h, use it. If it only says pure-O2 atmosphere,
+//    default purge is 2 × furnace_volume_m3 per hour for lab/pilot work.
+//    For industrial NCM/CAM plans with no disclosed O2 flow, set
+//    o2_basis="ncm_cam_eia_auxiliary" to use the EIA auxiliary anchor:
+//    Ningxia Zhonghua structured result `data/EIA/baseline_UPR/csv/utilities.csv`
+//    reports industrial_O2 = 52,000 t/a for 10,000 t/a NCM = 5.2 kg/kg.
 //    Per-kg basis: m_O2 / product_mass_kg.
+//
+// 4. Waste / emissions (auxiliary EIA factors only)
+//    Called when a patent names a waste/emission stream but omits a quantity.
+//    These factors are not primary patent data. They are bounded defaults from
+//    public EIA/acceptance-monitoring reports for China CAM plants:
+//      - Ningxia Zhonghua EIA Table 7-9: PM 1.401 t/a, Ni 0.29864 t/a,
+//        Co 0.238434 t/a, Mn 0.270926 t/a at 10,000 t/a NCM.
+//      - Bamo acceptance report Table 9.3-1: PM 2.05 t/a and heavy-metal dust
+//        1.76 kg/a at 25,000 t/a high-nickel ternary cathode material.
 // --------------------------------------------------------------------------
 
 import process from 'node:process';
 
 const HELP = `Usage:
-  node patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode <electricity|water|oxygen> --params '<json>'
+  node patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode <electricity|water|oxygen|waste> --params '<json>'
 
 Shared params:
   product_mass_kg        (number, required for electricity/oxygen; water optional)
@@ -81,7 +103,8 @@ Shared params:
 
 --mode water        params:
   solid_mass_kg          kg of solid being washed (per batch)
-  wash_regime            coprecipitate|post_sinter_rinse|simple_rinse  (default simple_rinse)
+  wash_regime            coprecipitate|post_sinter_rinse|simple_rinse|
+                         aqueous_coating_eia_aux  (default simple_rinse)
   product_mass_kg        kg of final product (for per-kg normalization; defaults to solid_mass_kg)
 
 --mode oxygen       params:
@@ -89,7 +112,13 @@ Shared params:
   duration_h             hours of O2 feeding
   furnace_volume_m3      furnace internal volume (m³)
   flow_Nm3_h             optional explicit flow (Nm³/h); overrides furnace_volume_m3 default
+  o2_basis               optional ncm_cam_eia_auxiliary fallback for industrial NCM/CAM
+  scale                  optional lab|pilot|industrial, carried into output only
   product_mass_kg        kg of final product
+
+--mode waste       params:
+  waste_regime           ncm_calcination_eia_auxiliary
+  product_mass_kg        optional kg product; defaults to 1 for per-kg factors
 `;
 
 function parseArgs(argv) {
@@ -107,6 +136,28 @@ function die(msg) {
   process.stderr.write(`estimate-utilities: ${msg}\n`);
   process.exit(2);
 }
+
+const EIA_AUXILIARY_ANCHORS = {
+  ningxia_zhonghua_ncm_2020: {
+    source_ref:
+      'Ningxia Zhonghua NCM EIA (2020), structured in data/EIA/baseline_UPR; auxiliary only.',
+    electricity_kWh_per_kg_site_avg: 13.392,
+    industrial_o2_kg_per_kg: 5.2,
+    coating_wastewater_kg_per_kg: 0.96,
+    fresh_water_makeup_kg_per_kg_site_avg: 25.49,
+    collected_or_rework_dust_kg_per_kg_range: [0.00487, 0.00512],
+    emitted_pm_kg_per_kg: 0.0001401,
+    emitted_ni_kg_per_kg: 0.000029864,
+    emitted_co_kg_per_kg: 0.0000238434,
+    emitted_mn_kg_per_kg: 0.0000270926,
+  },
+  bamo_acceptance_2023: {
+    source_ref:
+      'Guangxi Bamo ternary cathode acceptance monitoring report (2023), Table 9.3-1; auxiliary check only.',
+    emitted_pm_kg_per_kg: 0.000082,
+    emitted_heavy_metal_dust_kg_per_kg: 0.0000000704,
+  },
+};
 
 // ---- electricity ---------------------------------------------------------
 
@@ -173,8 +224,15 @@ export function estimateElectricity(p) {
       stir_kw,
       ...(process_type === 'microwave' ? { nameplate_kw: p.nameplate_kw } : {}),
     },
+    auxiliary_benchmarks: {
+      ncm_cam_site_electricity_kWh_per_kg:
+        EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.electricity_kWh_per_kg_site_avg,
+      source_ref: EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.source_ref,
+      note:
+        'Use as a reasonableness check only; patent-reported batch conditions and estimator calculation remain primary.',
+    },
     formula_ref:
-      'E_total = m*Cp*(T-25)/3600 + k_hold*(T-25)*t + P_stir*t; see script header for k_hold table.',
+      'E_total = m*Cp*(T-25)/3600 + k_hold*(T-25)*t + P_stir*t; EIA auxiliary check: Ningxia Zhonghua utilities.csv electricity 133,920,000 kWh/a / 10,000 t/a = 13.392 kWh/kg site average.',
   };
 }
 
@@ -184,6 +242,7 @@ const WASH_FACTOR = {
   coprecipitate: 5,
   post_sinter_rinse: 3,
   simple_rinse: 1.5,
+  aqueous_coating_eia_aux: EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.coating_wastewater_kg_per_kg,
 };
 
 export function estimateWater(p) {
@@ -201,7 +260,17 @@ export function estimateWater(p) {
     kg_wastewater_per_kg: round(m_water / product_mass_kg, 4),
     per_batch_kg: { water_in: round(m_water, 3), wastewater_out: round(m_water, 3) },
     inputs_used: { solid_mass_kg, wash_regime: regime, wash_factor: factor, product_mass_kg },
-    formula_ref: 'm_wash = m_solid × wash_factor; wastewater ≈ m_wash (ignores evaporation).',
+    auxiliary_benchmarks: {
+      ncm_cam_aqueous_coating_wastewater_kg_per_kg:
+        EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.coating_wastewater_kg_per_kg,
+      ncm_cam_site_fresh_water_makeup_kg_per_kg:
+        EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.fresh_water_makeup_kg_per_kg_site_avg,
+      source_ref: EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.source_ref,
+      note:
+        'Use coating/wash benchmarks only when the patent gives the relevant step but omits water dose.',
+    },
+    formula_ref:
+      'm_wash = m_solid × wash_factor; wastewater ≈ m_wash. EIA auxiliary coating fallback: Ningxia Zhonghua 5000 t/a line coating wastewater 4800 m3/a / 5000 t/a = 0.96 kg/kg.',
   };
 }
 
@@ -222,10 +291,31 @@ export function estimateOxygen(p) {
   }
   const { duration_h } = p;
   if (typeof duration_h !== 'number') die('duration_h required');
+  if (p.o2_basis === 'ncm_cam_eia_auxiliary') {
+    const kgPerKg = EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.industrial_o2_kg_per_kg;
+    return {
+      mode: 'oxygen',
+      kg_O2_per_kg: kgPerKg,
+      per_batch_kg: { o2_in: round(kgPerKg * product_mass_kg, 3) },
+      inputs_used: {
+        pure_oxygen: true,
+        duration_h,
+        o2_basis: p.o2_basis,
+        scale: p.scale ?? null,
+        product_mass_kg,
+      },
+      auxiliary_benchmarks: {
+        ncm_cam_industrial_o2_kg_per_kg: kgPerKg,
+        source_ref: EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.source_ref,
+      },
+      formula_ref:
+        'EIA auxiliary fallback for undisclosed industrial NCM/CAM O2 flow: Ningxia Zhonghua utilities.csv industrial_O2 52,000 t/a / 10,000 t/a NCM = 5.2 kg/kg. Patent remains primary for declaring pure-O2 atmosphere.',
+    };
+  }
   let flow_Nm3_h = p.flow_Nm3_h;
   if (typeof flow_Nm3_h !== 'number') {
     if (typeof p.furnace_volume_m3 !== 'number') die('flow_Nm3_h or furnace_volume_m3 required');
-    flow_Nm3_h = 0.5 * p.furnace_volume_m3;
+    flow_Nm3_h = 2 * p.furnace_volume_m3;
   }
   const V = flow_Nm3_h * duration_h;
   const m_O2 = V * 1.429;
@@ -238,9 +328,63 @@ export function estimateOxygen(p) {
       duration_h,
       flow_Nm3_h,
       furnace_volume_m3: p.furnace_volume_m3 ?? null,
+      scale: p.scale ?? null,
       product_mass_kg,
     },
-    formula_ref: 'V = flow_Nm3_h × t; m = V × 1.429 kg/Nm³ (O2 @ STP).',
+    auxiliary_benchmarks: {
+      ncm_cam_industrial_o2_kg_per_kg:
+        EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.industrial_o2_kg_per_kg,
+      source_ref: EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020.source_ref,
+      note:
+        'Benchmark only; do not replace a patent-reported O2 flow. Use o2_basis=ncm_cam_eia_auxiliary only when industrial NCM/CAM O2 flow is undisclosed.',
+    },
+    formula_ref: 'V = flow_Nm3_h × t; m = V × 1.429 kg/Nm³ (O2 @ STP); default flow = 2 furnace-volume turnovers/h when patent gives no flow.',
+  };
+}
+
+// ---- waste / emissions ---------------------------------------------------
+
+export function estimateWaste(p) {
+  const regime = p.waste_regime ?? 'ncm_calcination_eia_auxiliary';
+  if (regime !== 'ncm_calcination_eia_auxiliary') die(`unknown waste_regime ${regime}`);
+  const product_mass_kg = p.product_mass_kg ?? 1;
+  if (typeof product_mass_kg !== 'number' || product_mass_kg <= 0) die('product_mass_kg must be > 0');
+  const ningxia = EIA_AUXILIARY_ANCHORS.ningxia_zhonghua_ncm_2020;
+  const bamo = EIA_AUXILIARY_ANCHORS.bamo_acceptance_2023;
+  const emittedHeavyMetalTotal =
+    ningxia.emitted_ni_kg_per_kg + ningxia.emitted_co_kg_per_kg + ningxia.emitted_mn_kg_per_kg;
+  return {
+    mode: 'waste',
+    waste_regime: regime,
+    per_kg_product: {
+      emitted_PM_to_air_kg: round(ningxia.emitted_pm_kg_per_kg, 10),
+      emitted_Ni_to_air_kg: round(ningxia.emitted_ni_kg_per_kg, 10),
+      emitted_Co_to_air_kg: round(ningxia.emitted_co_kg_per_kg, 10),
+      emitted_Mn_to_air_kg: round(ningxia.emitted_mn_kg_per_kg, 10),
+      emitted_heavy_metal_total_to_air_kg: round(emittedHeavyMetalTotal, 10),
+      collected_or_rework_dust_kg_range: ningxia.collected_or_rework_dust_kg_per_kg_range,
+    },
+    per_batch_kg: {
+      emitted_PM_to_air: round(ningxia.emitted_pm_kg_per_kg * product_mass_kg, 8),
+      emitted_heavy_metal_total_to_air: round(emittedHeavyMetalTotal * product_mass_kg, 8),
+    },
+    auxiliary_benchmarks: {
+      ningxia_zhonghua_design_or_eia_total: {
+        source_ref:
+          'Ningxia Zhonghua EIA Table 7-9: PM 1.401 t/a, Ni 0.29864 t/a, Co 0.238434 t/a, Mn 0.270926 t/a for 10,000 t/a NCM.',
+        emitted_PM_kg_per_kg: ningxia.emitted_pm_kg_per_kg,
+        emitted_heavy_metal_total_kg_per_kg: round(emittedHeavyMetalTotal, 10),
+      },
+      bamo_acceptance_monitoring_check: {
+        source_ref: bamo.source_ref,
+        emitted_PM_kg_per_kg: bamo.emitted_pm_kg_per_kg,
+        emitted_heavy_metal_dust_kg_per_kg: bamo.emitted_heavy_metal_dust_kg_per_kg,
+      },
+      note:
+        'These are auxiliary CAM EIA/acceptance factors. Prefer patent-stated waste amounts, mass balances, or measured emissions when available.',
+    },
+    formula_ref:
+      'EIA auxiliary waste factor: annual pollutant mass / annual product mass; Ningxia PM 1.401 t/a / 10,000 t/a = 0.0001401 kg/kg, Bamo acceptance PM 2.05 t/a / 25,000 t/a = 0.000082 kg/kg.',
   };
 }
 
@@ -270,6 +414,7 @@ function main() {
     case 'electricity': out = estimateElectricity(params); break;
     case 'water':       out = estimateWater(params); break;
     case 'oxygen':      out = estimateOxygen(params); break;
+    case 'waste':       out = estimateWaste(params); break;
     default: die(`unknown --mode ${args.mode}`);
   }
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);

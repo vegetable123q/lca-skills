@@ -1,4 +1,4 @@
 interface:
   display_name: "Patent to Lifecycle Model"
   short_description: "Convert a patent or SOP into a local lifecyclemodel run"
-  default_prompt: "Use $patent-to-lifecyclemodel to turn a patent or SOP text into a complete TianGong TIDAS lifecyclemodel by authoring one plan.json, using item-based black-box processes when material quantities are missing, and running the local-only driver pipeline."
+  default_prompt: "Use $patent-to-lifecyclemodel to turn a patent or SOP text into a complete TianGong TIDAS lifecyclemodel by authoring one plan.json, using item-based black-box processes when material quantities are missing, estimating electricity/water/O2/waste only through estimate-utilities.mjs with formula/source refs preserved on exchanges, and running the local-only driver pipeline."

@@ -35,11 +35,28 @@
       "pure_oxygen": false,
       "reference_output_flow": "<flow_key that is the reference product OUT>",
       "inputs": [
-        {"flow": "<flow_key>", "amount": 0.0, "derivation": "Measured|Calculated|Estimated", "calc_note": "<required iff derivation=Calculated>"}
+        {
+          "flow": "<flow_key>",
+          "amount": 0.0,
+          "derivation": "Measured|Calculated|Estimated",
+          "calc_note": "<required iff derivation=Calculated>",
+          "formula_ref": "<optional estimator formula or mass-balance equation>",
+          "source_ref": "<optional patent/EIA source reference>",
+          "source_quote": "<optional short verbatim source phrase>",
+          "comment": "<optional audit note carried into the ILCD exchange comment>"
+        }
       ],
       "outputs": [
         {"flow": "<flow_key>", "amount": 1, "derivation": "Measured"},
-        {"flow": "<waste-flow_key>", "amount": 0.0, "derivation": "Estimated"}
+        {
+          "flow": "<waste-flow_key>",
+          "amount": 0.0,
+          "derivation": "Estimated",
+          "formula_ref": "<optional estimator formula or mass-balance equation>",
+          "source_ref": "<optional patent/EIA source reference>",
+          "source_quote": "<optional short verbatim source phrase>",
+          "comment": "<optional audit note carried into the ILCD exchange comment>"
+        }
       ]
     }
   ],
@@ -47,7 +64,8 @@
     "Use the SAME flow_key across processes to create edges (upstream OUTPUT key == downstream INPUT key).",
     "Every process must have exactly one output whose flow equals reference_output_flow; that is the reference exchange.",
     "Amounts are per 1 unit of the process's reference output.",
-    "derivation=Measured: the source text gives this exact quantity. derivation=Calculated: derived from source-given molar ratios/formulas/recipe fractions — MUST supply calc_note. derivation=Estimated: defaulted from engineering models (electricity/water/O2 should come from estimate-utilities.mjs).",
+    "derivation=Measured: the source text gives this exact quantity. derivation=Calculated: derived from source-given molar ratios/formulas/recipe fractions — MUST supply calc_note. derivation=Estimated: defaulted from engineering models (electricity/water/O2/waste should come from estimate-utilities.mjs).",
+    "For Estimated electricity/water/O2/waste exchanges, copy the estimator formula_ref and any source_ref into the exchange; materialize-from-plan carries those fields into ILCD generalComment.",
     "If a process is black_box=true because material quantities are not defensible, every flow used by that process must use unit=item and every exchange amount must be 1. Downstream processes consuming an item-unit flow inherit that item-based treatment.",
     "pure_oxygen=true is required to declare any O2 input (flow key containing 'o2' or 'oxygen'). Only set it when the source explicitly names a pure-O2 atmosphere.",
     "canonical_flow_key lets a flow (e.g. 'coso4_7h2o' hydrate) emit as another flow (e.g. 'coso4' anhydrous) with amount multiplied by conversion_factor (e.g. 154.99/281.10 ≈ 0.551). Both flows must be declared in this flows{} map; the canonical one is the form that actually enters the ILCD dataset.",

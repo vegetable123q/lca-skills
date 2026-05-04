@@ -187,6 +187,7 @@
       "technology": "NiSO4.6H2O + CoSO4.7H2O + MnSO4.H2O (total 2.0 mol/L) are co-precipitated with 4.0 mol/L NaOH and 0.2-0.4 mol/L NH3. A, B, and C streams are fed at controlled flow rates to maintain pH 11-12.8 at 40-80 C under N2 with CTAB emulsifier and MOFs template. The precipitate is washed, dried, and calcined at about 550 C to Ni0.8Co0.1Mn0.1O2.",
       "comment": "Detailed step normalized from the published example-style ratios in CN110980817B.",
       "black_box": false,
+      "pure_oxygen": false,
       "reference_output_flow": "ncm_oxide",
       "inputs": [
         {
@@ -230,14 +231,11 @@
           "derivation": "Estimated"
         },
         {
-          "flow": "o2",
-          "amount": 0.3,
-          "derivation": "Estimated"
-        },
-        {
           "flow": "electricity",
-          "amount": 18,
-          "derivation": "Estimated"
+          "amount": 2.2464,
+          "derivation": "Estimated",
+          "formula_ref": "estimate-utilities electricity calls for 40-80 C co-precipitation plus about 550 C calcination; summed kWh_per_kg = 2.2464.",
+          "source_ref": "CN110980817B process conditions; estimator primary calculation. EIA check only: Ningxia Zhonghua utilities.csv reports 13.392 kWh/kg site average."
         }
       ],
       "outputs": [
@@ -249,12 +247,15 @@
         {
           "flow": "na2so4_liquor",
           "amount": 3.5,
-          "derivation": "Estimated"
+          "derivation": "Estimated",
+          "comment": "Mother liquor retained as a waste/liquor output because sulfate salts are formed during NaOH co-precipitation; quantity is an engineering estimate from the example plan."
         },
         {
           "flow": "wastewater",
           "amount": 5,
-          "derivation": "Estimated"
+          "derivation": "Estimated",
+          "formula_ref": "estimate-utilities water: m_wash = m_solid x wash_factor; coprecipitate wash_factor = 5; wastewater approximately equals wash water.",
+          "source_ref": "Patent gives washing after precipitation but not wash-water dose; EIA is not used for this coprecipitate wash estimate."
         }
       ]
     },
@@ -271,6 +272,7 @@
       "technology": "NCM oxide is mixed with LiOH.H2O at mass ratio 3.10:1.88, sintered at 800 C in pure O2 for 10-12 h, crushed, washed, dried, then dry-blended with H3BO3 and heat-treated at 270 C for 10 h to form a B2O3 coating.",
       "comment": "Detailed downstream lithiation and boric-acid dry coating step from CN110980817B.",
       "black_box": false,
+      "pure_oxygen": true,
       "reference_output_flow": "cathode",
       "inputs": [
         {
@@ -290,18 +292,25 @@
         },
         {
           "flow": "o2",
-          "amount": 0.8,
-          "derivation": "Estimated"
+          "amount": 5.2,
+          "derivation": "Estimated",
+          "formula_ref": "EIA auxiliary fallback for undisclosed industrial NCM/CAM O2 flow: industrial_O2 52,000 t/a / 10,000 t/a NCM = 5.2 kg/kg.",
+          "source_ref": "Ningxia Zhonghua NCM EIA (2020), structured in data/EIA/baseline_UPR/csv/utilities.csv; auxiliary only.",
+          "source_quote": "CN110980817B states sintering in pure O2 for 10-12 h but does not disclose O2 flow."
         },
         {
           "flow": "water",
           "amount": 3,
-          "derivation": "Estimated"
+          "derivation": "Estimated",
+          "formula_ref": "estimate-utilities water: post_sinter_rinse wash_factor = 3; wastewater approximately equals wash water.",
+          "source_ref": "CN110980817B names washing after sintering but does not disclose water dose."
         },
         {
           "flow": "electricity",
-          "amount": 9.5,
-          "derivation": "Estimated"
+          "amount": 9.5749,
+          "derivation": "Estimated",
+          "formula_ref": "estimate-utilities electricity for 800 C pure-O2 sintering plus dry heat treatment; kWh_per_kg = 9.5749.",
+          "source_ref": "CN110980817B process temperatures and durations; EIA check only: Ningxia Zhonghua site average electricity = 13.392 kWh/kg."
         }
       ],
       "outputs": [
@@ -313,7 +322,9 @@
         {
           "flow": "wastewater",
           "amount": 3,
-          "derivation": "Estimated"
+          "derivation": "Estimated",
+          "formula_ref": "Mass balance paired with water input: wastewater = 3 kg/kg product, ignoring evaporation.",
+          "source_ref": "CN110980817B washing step; water amount estimated by estimator."
         }
       ]
     }

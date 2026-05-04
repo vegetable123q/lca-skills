@@ -233,6 +233,18 @@ function buildIlcd(proc) {
     if (x.derivation === 'Calculated' && x.calc_note) {
       commentBits.push(`calc_note: ${x.calc_note}`);
     }
+    if (x.formula_ref) {
+      commentBits.push(`formula_ref: ${x.formula_ref}`);
+    }
+    if (x.source_ref) {
+      commentBits.push(`source_ref: ${x.source_ref}`);
+    }
+    if (x.source_quote) {
+      commentBits.push(`source_quote: ${x.source_quote}`);
+    }
+    if (x.comment) {
+      commentBits.push(`comment: ${x.comment}`);
+    }
     const exch = {
       '@dataSetInternalID': id,
       referenceToFlowDataSet: {

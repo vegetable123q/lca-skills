@@ -1,87 +1,25 @@
-# Pitfalls observed during the reference run
+# Pitfalls
 
-Every item below was actually hit while building `output/CN110980817B/`. Read this before deviating from `workflow.md`.
+Observed while building `output/CN110980817B/`. Keep this file as a quick troubleshooting index; see `conversion-guide.zh-CN.md` for the full method, formulae, and references.
 
-## 1. `edge_count: 0` despite N processes
+| # | Symptom | Cause | Fix |
+| ---: | --- | --- | --- |
+| 1 | `edge_count: 0` despite multiple processes | Upstream outputs and downstream inputs do not share the same flow UUID. | Reuse the same `flow_key` in `plan.json`; `allocate-uuids` then assigns one UUID. |
+| 2 | `built_model_count: N` for N processes | `lifecyclemodel auto-build` grouped separate run dirs into separate single-node models. | Use the driver so all ILCD datasets land in one `runs/combined/` dir. |
+| 3 | `LIFECYCLEMODEL_AUTO_BUILD_STATE_NOT_FOUND` | Combined dir has exports but lacks the process-build state marker. | Let `materialize-from-plan` copy `cache/process_from_flow_state.json` and manifests from the first scaffold run. |
+| 4 | `LIFECYCLEMODEL_AUTO_BUILD_REFERENCE_FLOW_MISSING` | `quantitativeReference.referenceToReferenceFlow` is missing or points at no exchange. | Ensure each process output includes `reference_output_flow`; the materializer points to that output exchange. |
+| 5 | Process auto-build produces no process datasets | `process auto-build` only scaffolds local stages in this workflow. | Treat scaffold runs as audit/support folders; ILCD datasets are materialized from `plan.json`. |
+| 6 | Amounts are marked `Measured` without direct source quantities | Patent recipes often give batch or range data, not per-FU inventory. | Use `Measured` only for exact quantities; use `Calculated` with `calc_note` or `Estimated` with `formula_ref`. |
+| 7 | Missing material quantities are filled with fake kg values | The patent step exists, but inventory is not defensible. | Mark the process `black_box: true`, use `unit:item`, amount `1`, and explain the missing data. |
+| 8 | Source patent or run outputs are not tracked by git | `data/` and `output/` are gitignored. | Archive the run folder or hand off through `lca-publish-executor` when sharing is needed. |
+| 9 | Unexpected CWD-local `artifacts/` appears | Builder cache side effect from relative CLI paths. | Ignore it; canonical outputs live under `--out-dir`. |
+| 10 | Re-run fails because run root already exists | Prior `artifacts/`, `lifecyclemodel-run/`, or `orchestrator-run/` collides with a new execute. | Remove generated dirs before re-running. |
+| 11 | Coated/doped final product stoichiometry is off | Final product is not a single pure phase. | Size reagents on the last uncoated matrix, then mass-balance coating/doping separately. |
+| 12 | Utility values vary without basis | LLM guessed electricity, water, O2, or waste factors. | Call `estimate-utilities.mjs` and copy returned amount plus `formula_ref`/`source_ref` into the exchange. |
+| 13 | EIA replaces patent recipe | Plant-level EIA factors were used as if they were patent unit-operation data. | Patent first, EIA second. Use EIA only as an auxiliary anchor for missing utility/waste quantities on named operations. |
 
-**Symptom:** `lifecyclemodel auto-build` completes, reports `built_model_count: 1` and `process_count: N`, but `edge_count: 0`.
-
-**Root cause:** the builder infers edges by scanning exchanges for `referenceToFlowDataSet.@refObjectId` values that appear as Output in one process and Input in another. If you generated fresh UUIDs independently for each dataset, none match → no edges.
-
-**Fix:** centralize UUID allocation **before** authoring datasets. Use `scripts/allocate-uuids.mjs` (or equivalent) to produce one `uuids.json`, then reference only those UUIDs in every dataset.
-
-## 2. `built_model_count: N` (one model per run) instead of 1
-
-**Symptom:** three processes, three runs, output has three single-node models with `edge_count: 0` each.
-
-**Root cause:** `lifecyclemodel auto-build` groups processes **by run directory**. It does not look across runs. Three runs ⇒ three models.
-
-**Fix:** consolidate. Create one `runs/combined/exports/processes/` dir and put every ILCD dataset JSON in there. Point the manifest's `local_runs[0]` at that combined dir. The original per-layer scaffold runs from Stage 2 are kept for audit, not consumed by Stage 5.
-
-## 3. `LIFECYCLEMODEL_AUTO_BUILD_STATE_NOT_FOUND`
-
-**Symptom:** auto-build refuses the combined run with "missing state file".
-
-**Root cause:** the CLI expects `<run>/cache/process_from_flow_state.json` to exist as a marker of a valid process-build run. The combined dir has `exports/processes/` but nothing else.
-
-**Fix:** copy any one scaffold run's `cache/process_from_flow_state.json` and `manifests/*.json` into the combined run. Those files are only sanity-checks for this stage; the actual graph inference reads `exports/processes/` only.
-
-## 4. `LIFECYCLEMODEL_AUTO_BUILD_REFERENCE_FLOW_MISSING`
-
-**Symptom:** auto-build rejects a dataset citing missing `referenceToReferenceFlow`.
-
-**Root cause:** `quantitativeReference.referenceToReferenceFlow` is missing, empty, or points at an `@dataSetInternalID` that no exchange has.
-
-**Fix:** set it to the `@dataSetInternalID` of the **output** exchange that represents the step's reference product. Keep `@dataSetInternalID` values unique within a dataset.
-
-## 5. Process auto-build only scaffolds — no datasets come out
-
-**Symptom:** `process auto-build` reports `status: prepared_local_process_auto_build_run` but `exports/processes/` is empty.
-
-**Root cause:** the CLI's `auto-build` command sets up stages 01 → 10 but does not execute them. Stages 03-09 rely on LLM / KB / unstructured-parser modules that are out of scope for this skill family.
-
-**Fix:** accept that scaffolding is as far as Stage 2 goes. Hand-author ILCD datasets in Stage 4.
-
-## 6. Amounts are estimates, not measurements
-
-The patent text rarely specifies per-kg-of-product amounts — it gives batch recipes ("weigh 3.10 kg NCM…") and ranges ("15-40 h"). Author with `"dataDerivationTypeStatus": "Estimated"` and note any unit conversions. Do not mark `"Measured"` unless the source really supplies per-functional-unit numbers.
-
-## 6a. Truly missing inputs should become `item`, not fake kilograms
-
-If a process is clearly present in the source but the material input quantities are not defensible even as normalized estimates, do not invent a kilogram inventory. Mark the process with `"black_box": true`, switch every flow used by that process to `unit: "item"`, and explain why in `comment`.
-
-## 7. `data/` is gitignored
-
-The source patent lives in `data/`, which is in `.gitignore`. That's fine — the `output/<SOURCE>/` directory carries the full audit trail (flows + scaffolds + datasets + manifests). `output/` is also gitignored; if you want to share a run, archive the folder or publish via `lca-publish-executor`.
-
-## 8. Cache side-effect: unexpected `artifacts/` subdir
-
-When `lifecyclemodel auto-build` runs with a relative CLI dir, it may create a CWD-local `artifacts/process_from_flow/` as a hand-off cache. Ignore it — the canonical outputs live under `--out-dir`.
-
-## 9. Orchestrator `execute` fails with "run root already exists and is not empty"
-
-**Symptom:** second `orchestrate execute` fails with `process auto-build run root already exists`, pointing at `<base>/artifacts/process_from_flow/...`.
-
-**Root cause:** the underlying `tiangong process auto-build` refuses to overwrite a non-empty run root. If a prior run created `<base>/artifacts/process_from_flow/<node>/`, a subsequent re-run collides.
-
-**Fix:** remove `<base>/artifacts/`, `<base>/lifecyclemodel-run/`, and `<base>/orchestrator-run/` before re-running. The driver script does not auto-clean; do it explicitly:
+Generated folders that are safe to remove for a clean plan-driven rerun:
 
 ```bash
-rm -rf output/<SOURCE>/{artifacts,lifecyclemodel-run,orchestrator-run}
+rm -rf output/<SOURCE>/{artifacts,flows,runs,manifests,lifecyclemodel-run,orchestrator-run,orchestrator-request.json,uuids.json}
 ```
-
-Authored inputs (`flows/`, `runs/combined/exports/processes/`, `manifests/`, `uuids.json`, `orchestrator-request.json`) are preserved.
-
-**Symptom:** you divide `1 kg` of the functional unit by the MW of the pure parent phase (e.g. `LiNi0.8Co0.1Mn0.1O2 = 97.28 g/mol`) to get upstream reagent moles, and the numbers end up 2–10% off with no clear reason.
-
-**Root cause:** the functional-unit product often carries a coating (B₂O₃, Al₂O₃), dopant, or binder. It is not a single pure phase, so it does not have a single MW. Any stoichiometry done on it is mass-balance-wrong by the coating fraction.
-
-**Fix:** run stoichiometry on the **last uncoated intermediate** (e.g. the NCM matrix before boric-acid coating), then mass-balance the coating mass separately. For CN110980817B this means: S2 reagents are sized per kg of `Ni0.8Co0.1Mn0.1O2` (MW 90.34) and S3's NCM input is `1 kg cathode − m_coating` kg of the matrix; the coating (H₃BO₃ → B₂O₃) goes in its own exchange.
-
-## 11. Do not invent utility numbers — call `estimate-utilities.mjs`
-
-**Symptom:** one run says electricity = 18 kWh/kg, another similar process says 9 kWh/kg, with no defensible basis for the 2× gap.
-
-**Root cause:** LLM guessed kW × h without normalizing to the functional unit or accounting for process type.
-
-**Fix:** call `patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode electricity|water|oxygen` with the patent-reported temperature, time, and batch mass. Copy the returned `kWh_per_kg` / `kg_per_kg` as the exchange amount; copy the `formula_ref` into the process `comment` so reviewers can reproduce the number. Different patents driven by the same estimator are then directly comparable.
