@@ -18,11 +18,10 @@
 //   node scripts/materialize-from-plan.mjs \
 //     --plan output/<SOURCE>/plan.json \
 //     --base output/<SOURCE> \
-//     [--seed <hex>]    # deterministic UUIDs
+//     [--seed <hex>]    # optional deterministic UUID seed; existing uuids.json wins
 //     [--json]
 
 import { spawnSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +34,7 @@ import {
   writeFlowResolution,
 } from './flow-resolution.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
+import { buildPlanUuids, readExistingUuids } from './uuid-plan.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const skillDir = path.dirname(path.dirname(__filename));
@@ -107,24 +107,18 @@ function prefixOnce(prefix, text) {
   return trimmed.startsWith(prefix) ? trimmed : `${prefix} ${trimmed}`.trim();
 }
 
-function seededUuid(key) {
-  if (!seed) return crypto.randomUUID();
-  const h = crypto.createHash('sha256').update(`${seed}|${key}`).digest('hex');
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
-}
-
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
 function writeJson(p, obj) { ensureDir(path.dirname(p)); fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n'); }
 
 // ---------- 1. Allocate UUIDs from plan ----------
 const flowKeys = Object.keys(plan.flows || {});
 const procKeys = (plan.processes || []).map((p) => p.key);
-const uuids = {
-  flows: Object.fromEntries(flowKeys.map((k) => [k, seededUuid(`flow:${k}`)])),
-  procs: Object.fromEntries(procKeys.map((k) => [k, seededUuid(`proc:${k}`)])),
-  srcs: { patent: seededUuid(`src:${plan.source?.id || 'source'}`) },
-};
-writeJson(path.join(base, 'uuids.json'), uuids);
+const uuidsFile = path.join(base, 'uuids.json');
+const uuids = buildPlanUuids(plan, {
+  existing: readExistingUuids(uuidsFile),
+  seed,
+});
+writeJson(uuidsFile, uuids);
 const flowResolution = buildFlowResolution(plan, uuids, loadFlowScopeRows(flowScopeFile));
 writeFlowResolution(flowResolutionFile || path.join(base, 'flow-resolution.json'), flowResolution);
 

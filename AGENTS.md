@@ -60,6 +60,15 @@ Load docs in this order:
 
 Do not start by inferring behavior from chat history or one skill directory alone.
 
+## Skill Creation Contract
+
+When creating or modifying a checked-in skill:
+
+1. Follow the AI load order above.
+2. Read `/Users/originflow/Downloads/AGENTS.md` as the external reusable-skills creation contract.
+3. If that external contract references governance files that are absent in this checkout, such as `.docpact/config.yaml` or `_docs/**`, record that those checks are unavailable instead of fabricating them.
+4. Use the system `skill-creator` guidance for new skills, then keep the checked-in skill thin and aligned with this repository's CLI-wrapper boundary.
+
 ## Repo Ownership
 
 This repo owns:

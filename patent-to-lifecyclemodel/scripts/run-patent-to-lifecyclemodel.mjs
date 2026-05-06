@@ -87,6 +87,11 @@ const runLocalStages = !publishOnly;
 const runStage5 = runLocalStages && (stage5Only || (!stage5Only && !stage6Only) || has('--all'));
 const runStage6 = runLocalStages && (stage6Only || (!stage5Only && !stage6Only) || has('--all'));
 
+function cleanPathForPlanRerun(targetPath) {
+  if (!planPath) return;
+  fs.rmSync(targetPath, { recursive: true, force: true });
+}
+
 function runCommand(label, command, args) {
   if (!jsonMode) console.error(`[${label}]`);
   const res = spawnSync(command, args, { stdio: jsonMode ? 'pipe' : 'inherit' });
@@ -157,6 +162,7 @@ if (planPath) {
 const manifestPath = path.join(base, 'manifests', 'lifecyclemodel-manifest.json');
 const lifecyclemodelRunDir = path.join(base, 'lifecyclemodel-run');
 if (runStage5) {
+  cleanPathForPlanRerun(lifecyclemodelRunDir);
   if (!fs.existsSync(manifestPath)) {
     console.error(`run-patent-to-lifecyclemodel: missing ${manifestPath} (author it or pass --plan)`);
     process.exit(2);
@@ -250,6 +256,8 @@ if (planPath && runStage6) {
 // ---------- Stage 6 ----------
 const orchestratorRunDir = path.join(base, 'orchestrator-run');
 if (runStage6) {
+  cleanPathForPlanRerun(orchestratorRunDir);
+  cleanPathForPlanRerun(path.join(base, 'artifacts', 'process_from_flow'));
   if (!fs.existsSync(orchestratorRequestPath)) {
     console.error(`run-patent-to-lifecyclemodel: missing ${orchestratorRequestPath} (author it or pass --plan)`);
     process.exit(2);

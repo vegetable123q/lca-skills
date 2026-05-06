@@ -31,6 +31,7 @@ const defaultSkillNames = [
   'process-dedup-review',
   'process-scope-statistics',
   'tiangong-lca-remote-ops',
+  'tiangong-lca-remote-cleanup',
 ];
 
 const removedQuickValidatePattern = new RegExp(String.raw`quick_validate` + String.raw`\.py`, 'u');
@@ -150,6 +151,12 @@ const docGuards = [
 ];
 
 const requiredDocPatterns = [
+  {
+    file: 'AGENTS.md',
+    pattern: /\/Users\/originflow\/Downloads\/AGENTS\.md/u,
+    message:
+      'AGENTS.md should keep the external reusable-skills creation contract in the skill creation load path.',
+  },
   {
     file: 'lifecycleinventory-review/SKILL.md',
     pattern: /--rows-file/u,

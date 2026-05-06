@@ -22,5 +22,7 @@ Observed while building `output/CN110980817B/`. Keep this file as a quick troubl
 Generated folders that are safe to remove for a clean plan-driven rerun:
 
 ```bash
-rm -rf output/<SOURCE>/{artifacts,flows,runs,manifests,lifecyclemodel-run,orchestrator-run,orchestrator-request.json,uuids.json}
+rm -rf output/<SOURCE>/{artifacts,flows,runs,manifests,lifecyclemodel-run,orchestrator-run,orchestrator-request.json}
 ```
+
+Keep `uuids.json` when the dataset has already been published; deleting it can change remote IDs and prevent overwrite-based correction.

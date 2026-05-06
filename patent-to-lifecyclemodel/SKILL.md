@@ -26,6 +26,7 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
 ```
 
 Stage 7 first publishes generated flow datasets through `tiangong flow publish-reviewed-data`, then writes `publish-request.json` and calls `tiangong publish run`; do not add remote-write logic inside this skill.
+Reruns preserve `uuids.json` when present; keep that file when correcting previously published data so remote rows can be overwritten with stable IDs.
 
 ## Plan Rules
 
@@ -91,6 +92,7 @@ cat output/<SOURCE>/publish-run/publish-report.json
 
 Expected: process count matches the plan, edges connect shared flows, no publish failures, and no black-box process unless the plan documents a critical data gap.
 Also verify `flow-resolution.json` reuses database flows where possible, the flow publish report only prepares or commits unresolved generated flows, and process exchange references scan as `exists_in_target`.
+For a clean rerun, remove generated run directories but keep `plan.json` and `uuids.json`.
 
 ## References
 
