@@ -139,11 +139,13 @@ function buildFlowDataset(flowKey, flow, uuid, plan) {
   };
 }
 
-export function buildPatentFlowRowsFromPlan(plan, uuids) {
+export function buildPatentFlowRowsFromPlan(plan, uuids, options = {}) {
+  const resolution = options.resolution || null;
   return Object.entries(plan?.flows || {})
     .sort(([left], [right]) => left.localeCompare(right))
+    .filter(([flowKey]) => resolution?.flows?.[flowKey]?.decision !== 'reuse_existing')
     .map(([flowKey, flow]) => {
-      const id = uuids?.flows?.[flowKey];
+      const id = resolution?.flows?.[flowKey]?.id || uuids?.flows?.[flowKey];
       if (!id) {
         throw new Error(`Missing UUID for flow ${flowKey}`);
       }
@@ -155,9 +157,10 @@ export function buildPatentFlowRowsFromPlan(plan, uuids) {
     });
 }
 
-export function writePatentFlowExports(base, combinedRunName, plan, uuids) {
+export function writePatentFlowExports(base, combinedRunName, plan, uuids, options = {}) {
   const exportDir = path.join(base, 'runs', combinedRunName, 'exports', 'flows');
-  const rows = buildPatentFlowRowsFromPlan(plan, uuids);
+  fs.rmSync(exportDir, { recursive: true, force: true });
+  const rows = buildPatentFlowRowsFromPlan(plan, uuids, options);
   rows.forEach((row) => {
     writeJson(path.join(exportDir, `${row.id}_${row.version}.json`), row.json_ordered);
   });

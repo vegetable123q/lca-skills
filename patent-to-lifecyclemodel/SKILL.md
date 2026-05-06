@@ -13,6 +13,7 @@ Thin wrapper. Author `output/<SOURCE>/plan.json`; the driver delegates build and
 node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --plan output/<SOURCE>/plan.json \
   --base output/<SOURCE> \
+  --flow-scope-file output/<SOURCE>/flow-scope.json \
   --all --json
 ```
 
@@ -30,6 +31,8 @@ Stage 7 first publishes generated flow datasets through `tiangong flow publish-r
 
 - Split the patent route into one process per defensible unit operation.
 - Reuse the same `flow_key` for an upstream output and downstream input; this creates lifecyclemodel edges.
+- Resolve flows against database scope first. Pass `--flow-scope-file`; unique exact matches are reused and only unresolved patent-specific flows are generated.
+- If database search returns multiple defensible candidates, add an audited `existing_flow_ref` to the flow instead of creating a duplicate.
 - Use normal physical units such as `kg`, `L`, `mol`, `kWh`, and `m3`; reserve `item` for unavoidable black-box processes.
 - `Measured` means directly stated. `Calculated` means source-derived; add `calc_note`. `Estimated` means source missing; add `formula_ref` or `source_ref`.
 - Use patent masses, volumes, concentrations, ratios, yields, residence times, temperatures, and flow rates before estimating.
@@ -49,7 +52,19 @@ Stage 7 first publishes generated flow datasets through `tiangong flow publish-r
   "goal": { "name": "...", "functional_unit": {"amount": 1, "unit": "kg"}, "boundary": "..." },
   "geography": "CN",
   "reference_year": "2019",
-  "flows": { "<flow_key>": { "name_en": "...", "name_zh": "...", "unit": "kg" } },
+  "flows": {
+    "<flow_key>": {
+      "name_en": "...",
+      "name_zh": "...",
+      "unit": "kg",
+      "existing_flow_ref": {
+        "id": "<DB-FLOW-UUID>",
+        "version": "01.00.000",
+        "name": "...",
+        "unit": "kg"
+      }
+    }
+  },
   "processes": [{
     "key": "<proc_key>",
     "step_id": "S1",
@@ -75,7 +90,7 @@ cat output/<SOURCE>/publish-run/publish-report.json
 ```
 
 Expected: process count matches the plan, edges connect shared flows, no publish failures, and no black-box process unless the plan documents a critical data gap.
-Also verify the flow publish report prepared or committed every generated flow before process/model publish; process exchange references must scan as `exists_in_target`.
+Also verify `flow-resolution.json` reuses database flows where possible, the flow publish report only prepares or commits unresolved generated flows, and process exchange references scan as `exists_in_target`.
 
 ## References
 

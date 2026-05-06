@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   buildPatentFlowRowsFromPlan,
   isExistingFlowPreflightOnlyReport,
+  writePatentFlowExports,
 } from '../patent-to-lifecyclemodel/scripts/flow-datasets.mjs';
 
 test('buildPatentFlowRowsFromPlan emits publishable flow datasets with reference properties', () => {
@@ -80,4 +84,55 @@ test('isExistingFlowPreflightOnlyReport recognizes already-visible flow prefligh
     }),
     false,
   );
+});
+
+test('buildPatentFlowRowsFromPlan only emits flow datasets that need creation', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      oxygen: { name_en: 'Oxygen', unit: 'kg' },
+      product: { name_en: 'Patent product', unit: 'kg' },
+    },
+  };
+  const uuids = {
+    flows: {
+      oxygen: 'new-oxygen',
+      product: 'new-product',
+    },
+  };
+  const resolution = {
+    flows: {
+      oxygen: { decision: 'reuse_existing', id: 'db-oxygen', version: '01.01.002' },
+      product: { decision: 'create_new', id: 'new-product', version: '01.00.000' },
+    },
+  };
+
+  const rows = buildPatentFlowRowsFromPlan(plan, uuids, { resolution });
+
+  assert.deepEqual(
+    rows.map((row) => row.id),
+    ['new-product'],
+  );
+});
+
+test('writePatentFlowExports removes stale flow export files', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ptl-flow-exports-'));
+  const staleFile = path.join(base, 'runs', 'combined', 'exports', 'flows', 'stale.json');
+  fs.mkdirSync(path.dirname(staleFile), { recursive: true });
+  fs.writeFileSync(staleFile, '{}\n');
+
+  writePatentFlowExports(
+    base,
+    'combined',
+    {
+      source: { id: 'CN123' },
+      flows: {
+        product: { name_en: 'Patent product', unit: 'kg' },
+      },
+    },
+    { flows: { product: 'new-product' } },
+  );
+
+  assert.equal(fs.existsSync(staleFile), false);
+  assert.deepEqual(fs.readdirSync(path.dirname(staleFile)), ['new-product_01.00.000.json']);
 });

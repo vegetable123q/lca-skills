@@ -1,4 +1,4 @@
 interface:
   display_name: "Patent to Lifecycle Model"
   short_description: "Convert a patent or SOP into a lifecyclemodel run with flow-backed tiangong publish"
-  default_prompt: "Use $patent-to-lifecyclemodel to author one plan.json from a patent/SOP, split it into defensible unit-operation processes, derive measured/calculated/estimated exchanges where possible, avoid black-box processes unless critical data are missing, run the driver, and publish generated flows plus the lifecyclemodel bundle through tiangong only when explicitly requested."
+  default_prompt: "Use $patent-to-lifecyclemodel to author one plan.json from a patent/SOP, split it into defensible unit-operation processes, derive measured/calculated/estimated exchanges where possible, resolve flows against database scope first with existing_flow_ref overrides for reviewed ambiguous matches, avoid black-box processes unless critical data are missing, run the driver, and publish generated flows plus the lifecyclemodel bundle through tiangong only when explicitly requested."

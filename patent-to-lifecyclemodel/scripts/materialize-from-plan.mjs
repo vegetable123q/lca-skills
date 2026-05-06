@@ -28,6 +28,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildCombinedProcessFromFlowState } from './combined-state.mjs';
 import { writePatentFlowExports } from './flow-datasets.mjs';
+import {
+  applyFlowResolutionToExchange,
+  buildFlowResolution,
+  loadFlowScopeRows,
+  writeFlowResolution,
+} from './flow-resolution.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,10 +45,10 @@ const arg = (f, d = null) => { const i = argv.indexOf(f); return i === -1 ? d : 
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--seed <seed>] [--json]
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--flow-scope-file <flows.json|jsonl>] [--seed <seed>] [--json]
 
 Examples:
-  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --json
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --flow-scope-file output/db-flows.json --json
   node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --seed cn111725499b
 `.trim());
 }
@@ -55,6 +61,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
 const planPath = arg('--plan');
 const baseArg = arg('--base');
 const seed = arg('--seed', '');
+const flowScopeFile = arg('--flow-scope-file');
+const flowResolutionFile = arg('--flow-resolution-file');
 const jsonMode = argv.includes('--json');
 
 if (!planPath || !baseArg) {
@@ -117,6 +125,8 @@ const uuids = {
   srcs: { patent: seededUuid(`src:${plan.source?.id || 'source'}`) },
 };
 writeJson(path.join(base, 'uuids.json'), uuids);
+const flowResolution = buildFlowResolution(plan, uuids, loadFlowScopeRows(flowScopeFile));
+writeFlowResolution(flowResolutionFile || path.join(base, 'flow-resolution.json'), flowResolution);
 
 // ---------- 2. Author flow files ----------
 (plan.processes || []).forEach((proc, idx) => {
@@ -173,6 +183,7 @@ const procBuilderScript = path.join(projectRoot, 'process-automated-builder', 's
 const combinedRunName = combinedRunNameFromSourceId(plan.source?.id);
 const combinedDir = path.join(base, 'runs', combinedRunName);
 const combinedExports = path.join(combinedDir, 'exports', 'processes');
+fs.rmSync(combinedExports, { recursive: true, force: true });
 ensureDir(combinedExports);
 ensureDir(path.join(combinedDir, 'cache'));
 ensureDir(path.join(combinedDir, 'manifests'));
@@ -193,7 +204,9 @@ writeJson(
   path.join(combinedDir, 'cache', 'process_from_flow_state.json'),
   buildCombinedProcessFromFlowState(plan, uuids),
 );
-const flowExport = writePatentFlowExports(base, combinedRunName, plan, uuids);
+const flowExport = writePatentFlowExports(base, combinedRunName, plan, uuids, {
+  resolution: flowResolution,
+});
 
 const VERSION = '00.00.001';
 const sourceUuid = uuids.srcs.patent;
@@ -229,8 +242,6 @@ function buildIlcd(proc) {
 
   const buildExchange = (x, direction) => {
     const { targetKey, factor, sourceFlow } = resolveCanonical(x.flow);
-    const targetFlow = plan.flows[targetKey] || {};
-    const amount = (x.amount ?? 0) * factor;
     const id = nextId();
     if (direction === 'Output' && x.flow === refFlowKey) refInternalId = id;
     const commentBits = [];
@@ -254,22 +265,26 @@ function buildIlcd(proc) {
     if (x.comment) {
       commentBits.push(`comment: ${x.comment}`);
     }
-    const exch = {
-      '@dataSetInternalID': id,
-      referenceToFlowDataSet: {
-        '@type': 'flow data set',
-        '@refObjectId': uuids.flows[targetKey],
-        '@version': '01.00.000',
-        'common:shortDescription': [{ '@xml:lang': 'en', '#text': targetFlow.name_en || targetKey }],
+    const exch = applyFlowResolutionToExchange(
+      {
+        ...x,
+        flow: targetKey,
+        amount: (x.amount ?? 0) * factor,
       },
-      referenceUnit: targetFlow.unit || 'kg',
-      exchangeDirection: direction,
-      meanAmount: amount,
-      resultingAmount: amount,
-      dataDerivationTypeStatus: x.derivation || (direction === 'Output' ? 'Measured' : 'Estimated'),
-    };
+      direction,
+      plan,
+      flowResolution,
+      {
+        generatedFlowId: uuids.flows[targetKey],
+        exchangeId: id,
+      },
+    );
     if (direction === 'Output' && x.flow === refFlowKey) {
       exch.quantitativeReference = true;
+    }
+    const existingComment = exch['common:generalComment']?.[0]?.['#text'];
+    if (existingComment) {
+      commentBits.unshift(existingComment);
     }
     if (commentBits.length) {
       exch['common:generalComment'] = [{ '@xml:lang': 'en', '#text': commentBits.join('; ') }];
@@ -370,6 +385,7 @@ const summary = {
   processes: procKeys.length,
   flows: flowKeys.length,
   flow_exports: flowExport.rows.length,
+  flow_resolution: flowResolution.summary,
   uuids_file: path.join(base, 'uuids.json'),
   combined_run: combinedDir,
   lifecyclemodel_manifest: path.join(base, 'manifests', 'lifecyclemodel-manifest.json'),
