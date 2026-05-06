@@ -27,7 +27,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildTiangongInvocation } from '../../scripts/lib/cli-launcher.mjs';
+import {
+  isExistingFlowPreflightOnlyReport,
+  writePatentFlowPublishRowsFile,
+} from './flow-datasets.mjs';
 import { findBuiltLifecyclemodelFile } from './model-files.mjs';
+import { applyPatentPublishMetadataToBundle } from './publish-metadata.mjs';
 import { writePatentPublishRequest } from './publish-request.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -70,6 +75,7 @@ const publishRequestArg = arg('--publish-request');
 const publishOutDirArg = arg('--publish-out-dir');
 const publishMaxAttemptsArg = arg('--publish-max-attempts');
 const publishRetryDelayArg = arg('--publish-retry-delay-seconds');
+const flowTargetUserIdArg = arg('--flow-target-user-id');
 
 if (commitPublish && !publishToDb) {
   console.error('run-patent-to-lifecyclemodel: --commit requires --publish-to-db or --publish-only');
@@ -90,6 +96,37 @@ function runCommand(label, command, args) {
     process.exit(res.status ?? 1);
   }
   return res;
+}
+
+function runFlowPublishCommand(label, command, args) {
+  if (!jsonMode) console.error(`[${label}]`);
+  const res = spawnSync(command, args, { stdio: 'pipe' });
+  if (res.status === 0) {
+    if (!jsonMode && res.stdout) process.stdout.write(res.stdout.toString());
+    if (!jsonMode && res.stderr) process.stderr.write(res.stderr.toString());
+    return res;
+  }
+
+  let report = null;
+  try {
+    report = JSON.parse(res.stdout?.toString() || '{}');
+  } catch {
+    report = null;
+  }
+
+  if (isExistingFlowPreflightOnlyReport(report)) {
+    if (!jsonMode) {
+      console.error(
+        `[${label}] exact flow UUID/version rows are already visible; continuing to process/model publish`,
+      );
+    }
+    return res;
+  }
+
+  if (jsonMode && res.stdout) process.stderr.write(res.stdout.toString());
+  if (jsonMode && res.stderr) process.stderr.write(res.stderr.toString());
+  console.error(`run-patent-to-lifecyclemodel: ${label} failed`);
+  process.exit(res.status ?? 1);
 }
 
 function run(label, args) {
@@ -235,6 +272,32 @@ if (publishToDb) {
   if (!fs.existsSync(publishBundlePath)) {
     console.error(`run-patent-to-lifecyclemodel: missing ${publishBundlePath}; run Stage 6 before publish`);
     process.exit(2);
+  }
+  applyPatentPublishMetadataToBundle(publishBundlePath);
+
+  const flowRowsPath = path.join(base, 'flow-publish-rows.json');
+  const flowRows = writePatentFlowPublishRowsFile(base, flowRowsPath);
+  if (flowRows.rows.length > 0) {
+    const flowPublishInvocation = buildTiangongInvocation([
+      'flow',
+      'publish-reviewed-data',
+      '--flow-rows-file',
+      flowRowsPath,
+      '--out-dir',
+      path.join(base, 'flow-publish-run'),
+      '--flow-publish-policy',
+      'upsert_current_version',
+      '--process-publish-policy',
+      'skip',
+      ...(flowTargetUserIdArg ? ['--target-user-id', flowTargetUserIdArg] : []),
+      commitPublish ? '--commit' : '--dry-run',
+      '--json',
+    ], { repoRoot: projectRoot });
+    runFlowPublishCommand(
+      commitPublish ? 'stage7:tiangong flow publish commit' : 'stage7:tiangong flow publish dry-run',
+      flowPublishInvocation.command,
+      flowPublishInvocation.args,
+    );
   }
 
   const maxAttempts = publishMaxAttemptsArg == null ? 5 : Number(publishMaxAttemptsArg);

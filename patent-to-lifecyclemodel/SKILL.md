@@ -24,7 +24,7 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --publish-only --commit --json
 ```
 
-Stage 7 writes `publish-request.json` and calls `tiangong publish run`; do not add remote-write logic inside this skill.
+Stage 7 first publishes generated flow datasets through `tiangong flow publish-reviewed-data`, then writes `publish-request.json` and calls `tiangong publish run`; do not add remote-write logic inside this skill.
 
 ## Plan Rules
 
@@ -75,6 +75,7 @@ cat output/<SOURCE>/publish-run/publish-report.json
 ```
 
 Expected: process count matches the plan, edges connect shared flows, no publish failures, and no black-box process unless the plan documents a critical data gap.
+Also verify the flow publish report prepared or committed every generated flow before process/model publish; process exchange references must scan as `exists_in_target`.
 
 ## References
 

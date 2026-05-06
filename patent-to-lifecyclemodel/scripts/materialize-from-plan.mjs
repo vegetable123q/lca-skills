@@ -27,6 +27,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildCombinedProcessFromFlowState } from './combined-state.mjs';
+import { writePatentFlowExports } from './flow-datasets.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -192,6 +193,7 @@ writeJson(
   path.join(combinedDir, 'cache', 'process_from_flow_state.json'),
   buildCombinedProcessFromFlowState(plan, uuids),
 );
+const flowExport = writePatentFlowExports(base, combinedRunName, plan, uuids);
 
 const VERSION = '00.00.001';
 const sourceUuid = uuids.srcs.patent;
@@ -367,6 +369,7 @@ const summary = {
   plan: planPath,
   processes: procKeys.length,
   flows: flowKeys.length,
+  flow_exports: flowExport.rows.length,
   uuids_file: path.join(base, 'uuids.json'),
   combined_run: combinedDir,
   lifecyclemodel_manifest: path.join(base, 'manifests', 'lifecyclemodel-manifest.json'),
