@@ -45,10 +45,11 @@ const has = (f) => argv.includes(f);
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--flow-scope-file <flows.json|jsonl>] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--json]
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--flow-scope-file <flows.json|jsonl>] [--no-remote-flow-scope] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--json]
 
 Examples:
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --json
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --no-remote-flow-scope --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --stage5-only --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --publish-to-db --commit --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --publish-only --commit --json
@@ -77,6 +78,7 @@ const publishMaxAttemptsArg = arg('--publish-max-attempts');
 const publishRetryDelayArg = arg('--publish-retry-delay-seconds');
 const flowTargetUserIdArg = arg('--flow-target-user-id');
 const flowScopeFileArg = arg('--flow-scope-file');
+const noRemoteFlowScope = has('--no-remote-flow-scope');
 
 if (commitPublish && !publishToDb) {
   console.error('run-patent-to-lifecyclemodel: --commit requires --publish-to-db or --publish-only');
@@ -154,6 +156,7 @@ if (planPath) {
     '--plan', path.resolve(process.cwd(), planPath),
     '--base', base,
     ...(flowScopeFileArg ? ['--flow-scope-file', path.resolve(process.cwd(), flowScopeFileArg)] : []),
+    ...(noRemoteFlowScope ? ['--no-remote-flow-scope'] : []),
     '--json',
   ]);
 }

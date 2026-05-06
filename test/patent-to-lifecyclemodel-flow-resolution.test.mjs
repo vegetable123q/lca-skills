@@ -43,6 +43,17 @@ function flowRow({ id, version, name, property = 'Mass' }) {
   };
 }
 
+function multilingualFlowRow({ id, version, names, property = 'Mass' }) {
+  const row = flowRow({ id, version, name: names[0], property });
+  row.json_ordered.flowDataSet.flowInformation.dataSetInformation.name.baseName = names.map(
+    (name, index) => ({
+      '@xml:lang': index === 0 ? 'zh' : 'en',
+      '#text': name,
+    }),
+  );
+  return row;
+}
+
 test('buildFlowResolution reuses unique existing DB flow latest version and leaves patent-specific flow new', () => {
   const plan = {
     source: { id: 'CN123' },
@@ -88,6 +99,28 @@ test('buildFlowResolution does not auto-pick ambiguous distinct DB flows', () =>
   assert.equal(resolution.review[0].candidate_count, 2);
 });
 
+test('buildFlowResolution reuses stable generated UUID when it already exists remotely', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      electrolyte: { name_en: 'Patent electrolyte solution', unit: 'kg' },
+    },
+  };
+  const uuids = { flows: { electrolyte: 'stable-electrolyte' } };
+  const scopeRows = [
+    flowRow({ id: 'other-electrolyte', version: '01.00.000', name: 'Patent electrolyte solution' }),
+    flowRow({ id: 'stable-electrolyte', version: '01.00.000', name: 'Patent electrolyte solution' }),
+  ];
+
+  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+
+  assert.equal(resolution.flows.electrolyte.decision, 'reuse_existing');
+  assert.equal(resolution.flows.electrolyte.reason, 'stable_uuid_exact_name_match');
+  assert.equal(resolution.flows.electrolyte.id, 'stable-electrolyte');
+  assert.equal(resolution.summary.reuse_existing, 1);
+  assert.equal(resolution.review.length, 0);
+});
+
 test('buildFlowResolution honors explicit existing DB flow refs from the plan', () => {
   const plan = {
     source: { id: 'CN123' },
@@ -120,6 +153,51 @@ test('buildFlowResolution honors explicit existing DB flow refs from the plan', 
   assert.equal(resolution.flows.electricity.amount_factor, 0.2777777777777778);
   assert.equal(resolution.summary.reuse_existing, 1);
   assert.equal(resolution.review.length, 0);
+});
+
+test('buildFlowResolution matches plan aliases and multilingual DB names', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      potassium_chloride: {
+        name_en: 'Potassium chloride',
+        name_zh: '氯化钾',
+        aliases: ['KCl'],
+        unit: 'kg',
+      },
+      electricity: {
+        name_en: 'Power use',
+        aliases: ['Electricity, medium voltage'],
+        unit: 'kWh',
+      },
+    },
+  };
+  const uuids = {
+    flows: {
+      potassium_chloride: 'new-kcl',
+      electricity: 'new-electricity',
+    },
+  };
+  const scopeRows = [
+    multilingualFlowRow({
+      id: 'db-kcl',
+      version: '01.00.000',
+      names: ['氯化钾', 'Potassium chloride'],
+    }),
+    flowRow({
+      id: 'db-electricity',
+      version: '01.00.000',
+      name: 'Electricity, medium voltage',
+      property: 'Net calorific value',
+    }),
+  ];
+
+  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+
+  assert.equal(resolution.flows.potassium_chloride.decision, 'reuse_existing');
+  assert.equal(resolution.flows.potassium_chloride.id, 'db-kcl');
+  assert.equal(resolution.flows.electricity.decision, 'reuse_existing');
+  assert.equal(resolution.flows.electricity.id, 'db-electricity');
 });
 
 test('applyFlowResolutionToExchange writes existing DB flow refs and unit conversions', () => {

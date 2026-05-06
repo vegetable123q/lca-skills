@@ -241,16 +241,18 @@ conversion_factor = MW(anhydrous) / MW(hydrate)
 `materialize-from-plan.mjs` 负责把 `plan.json` 展开为多个工件：
 
 1. 为每个 `flow_key`、process key 和 source 分配 UUID，写入 `uuids.json`。
-2. 为每个 process 生成 `flows/NN-<proc_key>.json`，作为 `process-automated-builder` 的 scaffold 输入。
-3. 调用 `process-automated-builder auto-build` 建立每个 process 的 scaffold run。
-4. 直接从 plan 写出 `runs/<SOURCE>-combined/exports/processes/<PROC_UUID>_00.00.001.json`。
-5. 从第一个 scaffold run 复制 `cache/process_from_flow_state.json` 和 `manifests/*.json` 到 `runs/<SOURCE>-combined/`，满足 lifecyclemodel builder 的本地 run 形状要求。
-6. 写 `manifests/lifecyclemodel-manifest.json`，指向单一 source-specific combined run。
+2. 如果没有传入 `--flow-scope-file` 且 Supabase 读取环境可用，调用 `tiangong flow list` 生成远程数据库 `flow-scope.json`。
+3. 写 `flow-resolution.json`：原料、基础流、电力、水、氧气、燃料、废物和常见试剂优先复用唯一数据库匹配；专利特定中间产物、复合产物和结果物才新建。
+4. 为每个 process 生成 `flows/NN-<proc_key>.json`，作为 `process-automated-builder` 的 scaffold 输入。
+5. 调用 `process-automated-builder auto-build` 建立每个 process 的 scaffold run。
+6. 直接从 plan 写出 `runs/<SOURCE>-combined/exports/processes/<PROC_UUID>_00.00.001.json`。
+7. 从第一个 scaffold run 复制 `cache/process_from_flow_state.json` 和 `manifests/*.json` 到 `runs/<SOURCE>-combined/`，满足 lifecyclemodel builder 的本地 run 形状要求。
+8. 写 `manifests/lifecyclemodel-manifest.json`，指向单一 source-specific combined run。
 
 ILCD 数据集中的关键映射：
 
 - `common:UUID` 来自 `uuids.procs[proc.key]`。
-- 每个 exchange 的 `referenceToFlowDataSet.@refObjectId` 来自 `uuids.flows[flow_key]`。
+- 每个 exchange 的 `referenceToFlowDataSet.@refObjectId` 来自 `flow-resolution.json`；复用数据库 flow 时是远程 flow UUID，新建时才是 `uuids.flows[flow_key]`。
 - `quantitativeReference.referenceToReferenceFlow` 指向 reference output exchange 的 `@dataSetInternalID`。
 - `dataDerivationTypeStatus` 来自 exchange 的 `derivation`。
 - `calc_note`、`formula_ref`、`source_ref`、`source_quote`、`comment` 会合并进 exchange 的 `common:generalComment`。

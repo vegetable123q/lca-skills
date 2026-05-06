@@ -8,6 +8,8 @@ output/<SOURCE>/
 │   ├── 01-<layer>.json
 │   ├── 02-<layer>.json
 │   └── 03-<layer>.json
+├── flow-scope.json                           [Stage 1, remote DB scope via tiangong flow list]
+├── flow-resolution.json                      [Stage 1, authored here]
 ├── uuids.json                                [Stage 3, authored here]
 ├── runs/                                     [Stage 2 + Stage 4]
 │   ├── 01-<layer>/                           scaffold — owned by process-automated-builder
@@ -79,6 +81,8 @@ cat output/<SOURCE>/publish-run/publish-report.json
 | Dir / file | Owner skill | Editable by hand? |
 | --- | --- | --- |
 | `flows/*.json` | this skill | yes (Stage 1) |
+| `flow-scope.json` | `tiangong flow list` via this skill | yes, but prefer regenerating or supplying reviewed scope |
+| `flow-resolution.json` | this skill | no (regenerate via Stage 1) |
 | `uuids.json` | this skill | yes, but regenerate via helper |
 | `runs/<layer>/` (scaffold) | `process-automated-builder` | no (regenerate via Stage 2) |
 | `runs/<SOURCE>-combined/exports/processes/*.json` | this skill | yes (Stage 4) |

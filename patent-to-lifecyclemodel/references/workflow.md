@@ -33,6 +33,12 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --all --json
 ```
 
+When Supabase read env is set, the materializer automatically delegates to
+`tiangong flow list --state-code 0 --state-code 100 --all --page-size 1000 --json`
+and writes `output/<SOURCE>/flow-scope.json` before resolving exchanges. Pass
+`--flow-scope-file <file>` to freeze a reviewed scope; use `--no-remote-flow-scope`
+only for offline tests.
+
 What it runs:
 1. `normalize-plan.mjs`
    - fills defaults
@@ -40,6 +46,8 @@ What it runs:
    - enforces `black_box -> unit:item`
    - rewrites the authored plan in place so later stages read one canonical file
 2. `materialize-from-plan.mjs`
+   - `flow-scope.json` from remote database rows when env is present and no explicit scope file was supplied
+   - `flow-resolution.json`, reusing unique existing DB matches by English name, Chinese name, aliases, or `existing_flow_ref`
    - `flows/NN-<proc_key>.json` per process
    - `uuids.json` (one UUID per `flow_key` + one per `proc_key` + one source UUID)
    - `runs/<NN>-<proc_key>/` via `process-automated-builder auto-build`
@@ -61,7 +69,8 @@ cat output/<SOURCE>/orchestrator-run/publish-summary.json
 
 Success: `edge_count == processes-1` (linear chain) or higher (branched), `publish-summary.lifecyclemodel_count >= 1`.
 
-If one process is black-box, also inspect the generated process dataset comment and confirm it includes the black-box note.
+Also inspect `flow-resolution.json`: raw materials, utilities, elementary flows, electricity, water, oxygen, fuels, wastes, and common reagents should reuse existing DB flows where unique matches exist; generated flows should be limited to unresolved patent-specific intermediates/results.
+If one process is black-box, inspect the generated process dataset comment and confirm it includes the black-box note.
 
 ### Stage D — Optional database publish
 

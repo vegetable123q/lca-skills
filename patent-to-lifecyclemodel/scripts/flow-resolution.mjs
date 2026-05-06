@@ -51,6 +51,34 @@ function text(value) {
   return '';
 }
 
+function texts(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => texts(item));
+  }
+  if (isRecord(value)) {
+    if (typeof value['#text'] === 'string') return texts(value['#text']);
+    if (value.baseName !== undefined) return texts(value.baseName);
+    return Object.values(value).flatMap((nested) => texts(nested));
+  }
+  return [];
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
 function normalizeText(value) {
   return String(value || '')
     .replace(/[^0-9a-zA-Z\u4e00-\u9fff]+/gu, ' ')
@@ -82,11 +110,16 @@ function flowDataset(row) {
   return isRecord(payload?.flowDataSet) ? payload.flowDataSet : payload;
 }
 
-function flowNameFromDataset(dataset, fallback) {
+function flowNamesFromDataset(dataset, fallback) {
   const info = isRecord(dataset?.flowInformation?.dataSetInformation)
     ? dataset.flowInformation.dataSetInformation
     : {};
-  return text(info.name?.baseName ?? info.name ?? info['common:shortDescription']) || fallback;
+  return uniqueStrings([
+    ...texts(info.name?.baseName),
+    ...texts(info.name),
+    ...texts(info['common:shortDescription']),
+    fallback,
+  ]);
 }
 
 function propertyGroupFromDataset(dataset) {
@@ -146,13 +179,16 @@ function extractFlowRecord(row) {
     text(row?.version) ||
     text(dataset?.administrativeInformation?.publicationAndOwnership?.['common:dataSetVersion']) ||
     '01.00.000';
-  const name = flowNameFromDataset(dataset, id);
+  const names = flowNamesFromDataset(dataset, id);
+  const name = names[0] || id;
   const propertyGroup = propertyGroupFromDataset(dataset);
   return {
     id,
     version,
     name,
+    names,
     normalizedName: normalizeText(name),
+    normalizedNames: uniqueStrings(names.map((candidate) => normalizeText(candidate))),
     propertyGroup,
     unit: referenceUnitForGroup(propertyGroup, 'kg'),
   };
@@ -190,13 +226,45 @@ function resolveOneFlow(flowKey, flow, generatedId, scopeRecords) {
   }
 
   const sourceUnit = unitInfo(unit);
-  const exact = scopeRecords.filter((record) => record.normalizedName === normalizeText(name));
+  const flowNames = uniqueStrings([
+    name,
+    flow?.name_en,
+    flow?.name_zh,
+    flow?.name,
+    ...listify(flow?.aliases),
+    ...listify(flow?.match_names),
+  ]);
+  const normalizedFlowNames = uniqueStrings(flowNames.map((candidate) => normalizeText(candidate)));
+  const exact = scopeRecords.filter((record) =>
+    (record.normalizedNames || [record.normalizedName]).some((candidate) =>
+      normalizedFlowNames.includes(candidate),
+    ),
+  );
   const compatible = exact.filter((record) => {
     if (!sourceUnit.group || !record.propertyGroup) return true;
     return sourceUnit.group === record.propertyGroup;
   });
   const candidates = compatible.length > 0 ? compatible : exact;
   const latestById = collapseLatestById(candidates);
+  const stableExisting = generatedId
+    ? latestById.find((candidate) => candidate.id === generatedId)
+    : null;
+
+  if (stableExisting) {
+    const factor = amountFactor(unit, stableExisting.unit);
+    return {
+      flow_key: flowKey,
+      decision: 'reuse_existing',
+      reason: 'stable_uuid_exact_name_match',
+      id: stableExisting.id,
+      version: stableExisting.version,
+      name: stableExisting.name,
+      unit: stableExisting.unit,
+      amount_factor: factor,
+      source_unit: unit,
+      candidate_count: candidates.length,
+    };
+  }
 
   if (latestById.length === 1) {
     const target = latestById[0];

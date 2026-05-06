@@ -13,7 +13,6 @@ Thin wrapper. Author `output/<SOURCE>/plan.json`; the driver delegates build and
 node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --plan output/<SOURCE>/plan.json \
   --base output/<SOURCE> \
-  --flow-scope-file output/<SOURCE>/flow-scope.json \
   --all --json
 ```
 
@@ -25,6 +24,7 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --publish-only --commit --json
 ```
 
+When Supabase read env is present, materialization first delegates to `tiangong flow list --state-code 0 --state-code 100 --all` and writes `output/<SOURCE>/flow-scope.json`; pass `--flow-scope-file` to use a reviewed frozen scope, or `--no-remote-flow-scope` only for offline tests.
 Stage 7 first publishes generated flow datasets through `tiangong flow publish-reviewed-data`, then writes `publish-request.json` and calls `tiangong publish run`; do not add remote-write logic inside this skill.
 Reruns preserve `uuids.json` when present; keep that file when correcting previously published data so remote rows can be overwritten with stable IDs.
 
@@ -32,7 +32,8 @@ Reruns preserve `uuids.json` when present; keep that file when correcting previo
 
 - Split the patent route into one process per defensible unit operation.
 - Reuse the same `flow_key` for an upstream output and downstream input; this creates lifecyclemodel edges.
-- Resolve flows against database scope first. Pass `--flow-scope-file`; unique exact matches are reused and only unresolved patent-specific flows are generated.
+- Resolve flows against remote database scope first. Raw materials, elementary flows, utilities, electricity, water, oxygen, fuels, waste, and common reagents must prefer existing database flows; patent-specific intermediates, coated/composite products, and final results may be generated when unresolved.
+- Use `name_en`, `name_zh`, and `aliases`/`match_names` to expose database-matchable names such as generic reagent names or grid electricity names; unique exact matches across those names are reused and only unresolved patent-specific flows are generated.
 - If database search returns multiple defensible candidates, add an audited `existing_flow_ref` to the flow instead of creating a duplicate.
 - Use normal physical units such as `kg`, `L`, `mol`, `kWh`, and `m3`; reserve `item` for unavoidable black-box processes.
 - `Measured` means directly stated. `Calculated` means source-derived; add `calc_note`. `Estimated` means source missing; add `formula_ref` or `source_ref`.
@@ -91,7 +92,7 @@ cat output/<SOURCE>/publish-run/publish-report.json
 ```
 
 Expected: process count matches the plan, edges connect shared flows, no publish failures, and no black-box process unless the plan documents a critical data gap.
-Also verify `flow-resolution.json` reuses database flows where possible, the flow publish report only prepares or commits unresolved generated flows, and process exchange references scan as `exists_in_target`.
+Also verify `flow-scope.json` was generated from the remote database or intentionally supplied, `flow-resolution.json` reuses database flows where possible, the flow publish report only prepares or commits unresolved generated flows, the lifecyclemodel `json_tg.submodels` has one `primary` reference process, and process exchange references scan as `exists_in_target`.
 For a clean rerun, remove generated run directories but keep `plan.json` and `uuids.json`.
 
 ## References

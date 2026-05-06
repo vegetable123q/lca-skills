@@ -54,6 +54,52 @@ test('buildPatentLifecyclemodelJsonTg gives xflow nodes string labels and connec
   assert.equal(jsonTg.xflow.edges[0].data.connection.outputExchange['@flowUUID'], 'flow-a');
 });
 
+test('buildPatentLifecyclemodelJsonTg marks the quantitative reference process as primary', () => {
+  const payload = {
+    lifeCycleModelDataSet: {
+      lifeCycleModelInformation: {
+        dataSetInformation: {
+          referenceToResultingProcess: {
+            '@refObjectId': 'resulting-process',
+            '@version': '01.01.000',
+          },
+        },
+        quantitativeReference: {
+          referenceToReferenceProcess: '2',
+        },
+        technology: {
+          processes: {
+            processInstance: [
+              {
+                '@dataSetInternalID': '1',
+                referenceToProcess: {
+                  '@refObjectId': 'process-a',
+                  '@version': '00.00.001',
+                  'common:shortDescription': [{ '@xml:lang': 'en', '#text': 'Upstream step' }],
+                },
+              },
+              {
+                '@dataSetInternalID': '2',
+                referenceToProcess: {
+                  '@refObjectId': 'process-b',
+                  '@version': '00.00.001',
+                  'common:shortDescription': [{ '@xml:lang': 'en', '#text': 'Reference step' }],
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+
+  const jsonTg = buildPatentLifecyclemodelJsonTg(payload);
+
+  assert.equal(jsonTg.submodels[0].type, 'secondary');
+  assert.equal(jsonTg.submodels[1].type, 'primary');
+  assert.equal(jsonTg.xflow.nodes[1].data.name, 'Reference step');
+});
+
 test('applyPatentPublishMetadataToBundle inlines file entries so tiangong publish can read json_tg', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ptl-publish-metadata-'));
   const modelPath = path.join(dir, 'model.json');

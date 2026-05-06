@@ -52,6 +52,16 @@ function processLabel(reference, fallback) {
 
 function matchingResultingProcessType(instance, payload) {
   const model = root(payload);
+  const quantitativeReference =
+    model.lifeCycleModelInformation?.quantitativeReference || {};
+  const referenceProcessInternalId = text(
+    quantitativeReference.referenceToReferenceProcess,
+  );
+  const instanceInternalId = text(instance['@dataSetInternalID']);
+  if (referenceProcessInternalId && instanceInternalId === referenceProcessInternalId) {
+    return 'primary';
+  }
+
   const reference = isRecord(instance.referenceToProcess) ? instance.referenceToProcess : {};
   const resulting =
     model.lifeCycleModelInformation?.dataSetInformation?.referenceToResultingProcess || {};
@@ -83,6 +93,7 @@ export function buildPatentLifecyclemodelJsonTg(payload) {
         id: processId,
         ...(version ? { version } : {}),
         label,
+        name: label,
         shortDescription: label,
       },
     };

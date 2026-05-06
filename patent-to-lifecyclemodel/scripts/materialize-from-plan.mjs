@@ -33,6 +33,7 @@ import {
   loadFlowScopeRows,
   writeFlowResolution,
 } from './flow-resolution.mjs';
+import { ensureRemoteFlowScopeFile } from './remote-flow-scope.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
 import { buildPlanUuids, readExistingUuids } from './uuid-plan.mjs';
 
@@ -45,10 +46,11 @@ const arg = (f, d = null) => { const i = argv.indexOf(f); return i === -1 ? d : 
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--flow-scope-file <flows.json|jsonl>] [--seed <seed>] [--json]
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--flow-scope-file <flows.json|jsonl>] [--no-remote-flow-scope] [--seed <seed>] [--json]
 
 Examples:
   node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --flow-scope-file output/db-flows.json --json
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --no-remote-flow-scope --json
   node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --seed cn111725499b
 `.trim());
 }
@@ -64,6 +66,7 @@ const seed = arg('--seed', '');
 const flowScopeFile = arg('--flow-scope-file');
 const flowResolutionFile = arg('--flow-resolution-file');
 const jsonMode = argv.includes('--json');
+const noRemoteFlowScope = argv.includes('--no-remote-flow-scope');
 
 if (!planPath || !baseArg) {
   console.error('materialize-from-plan: --plan and --base are required');
@@ -119,7 +122,23 @@ const uuids = buildPlanUuids(plan, {
   seed,
 });
 writeJson(uuidsFile, uuids);
-const flowResolution = buildFlowResolution(plan, uuids, loadFlowScopeRows(flowScopeFile));
+let effectiveFlowScopeFile = flowScopeFile;
+if (!noRemoteFlowScope) {
+  try {
+    effectiveFlowScopeFile = ensureRemoteFlowScopeFile({
+      base,
+      explicitFlowScopeFile: flowScopeFile,
+      repoRoot: projectRoot,
+      env: process.env,
+    });
+  } catch (error) {
+    console.error(
+      `materialize-from-plan: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  }
+}
+const flowResolution = buildFlowResolution(plan, uuids, loadFlowScopeRows(effectiveFlowScopeFile));
 writeFlowResolution(flowResolutionFile || path.join(base, 'flow-resolution.json'), flowResolution);
 
 // ---------- 2. Author flow files ----------
