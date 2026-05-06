@@ -10,9 +10,13 @@
 //      3, 4), then Stage 5, then auto-generates orchestrator-request.json,
 //      then Stage 6.
 //
-//   2. Manual (when flows/ + runs/combined/ + orchestrator-request.json are
-//      already authored):
+//   2. Manual (when flows/ + one source-specific runs/<SOURCE>-combined/
+//      + orchestrator-request.json are already authored):
 //        --base <output/SOURCE>  [--stage5-only | --stage6-only | --all]
+//
+//   3. Publish execution (after Stage 6):
+//        --base <output/SOURCE> --publish-to-db [--commit]
+//      delegates to `tiangong publish run` and never implements write logic here.
 //
 // Usage examples:
 //   node scripts/run-patent-to-lifecyclemodel.mjs --plan output/X/plan.json --base output/X --json
@@ -22,6 +26,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildTiangongInvocation } from '../../scripts/lib/cli-launcher.mjs';
+import { findBuiltLifecyclemodelFile } from './model-files.mjs';
+import { writePatentPublishRequest } from './publish-request.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const skillDir = path.dirname(path.dirname(__filename));
@@ -33,11 +40,13 @@ const has = (f) => argv.includes(f);
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--stage5-only|--stage6-only|--all] [--json]
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--json]
 
 Examples:
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --stage5-only --json
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --publish-to-db --commit --json
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --publish-only --commit --json
 `.trim());
 }
 
@@ -54,12 +63,26 @@ const jsonMode = has('--json');
 
 const stage5Only = has('--stage5-only');
 const stage6Only = has('--stage6-only');
-const runStage5 = stage5Only || (!stage5Only && !stage6Only) || has('--all');
-const runStage6 = stage6Only || (!stage5Only && !stage6Only) || has('--all');
+const publishOnly = has('--publish-only');
+const publishToDb = has('--publish-to-db') || publishOnly;
+const commitPublish = has('--commit');
+const publishRequestArg = arg('--publish-request');
+const publishOutDirArg = arg('--publish-out-dir');
+const publishMaxAttemptsArg = arg('--publish-max-attempts');
+const publishRetryDelayArg = arg('--publish-retry-delay-seconds');
 
-function run(label, args) {
+if (commitPublish && !publishToDb) {
+  console.error('run-patent-to-lifecyclemodel: --commit requires --publish-to-db or --publish-only');
+  process.exit(2);
+}
+
+const runLocalStages = !publishOnly;
+const runStage5 = runLocalStages && (stage5Only || (!stage5Only && !stage6Only) || has('--all'));
+const runStage6 = runLocalStages && (stage6Only || (!stage5Only && !stage6Only) || has('--all'));
+
+function runCommand(label, command, args) {
   if (!jsonMode) console.error(`[${label}]`);
-  const res = spawnSync(process.execPath, args, { stdio: jsonMode ? 'pipe' : 'inherit' });
+  const res = spawnSync(command, args, { stdio: jsonMode ? 'pipe' : 'inherit' });
   if (res.status !== 0) {
     if (jsonMode && res.stdout) process.stderr.write(res.stdout.toString());
     if (jsonMode && res.stderr) process.stderr.write(res.stderr.toString());
@@ -67,6 +90,10 @@ function run(label, args) {
     process.exit(res.status ?? 1);
   }
   return res;
+}
+
+function run(label, args) {
+  return runCommand(label, process.execPath, args);
 }
 
 // ---------- Optional normalize + Stage 1/3/4: plan-driven materialization ----------
@@ -109,17 +136,16 @@ const orchestratorRequestPath = path.join(base, 'orchestrator-request.json');
 if (planPath && runStage6) {
   const plan = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), planPath), 'utf8'));
   const uuids = JSON.parse(fs.readFileSync(path.join(base, 'uuids.json'), 'utf8'));
-  // find the built model
-  const modelsDir = path.join(lifecyclemodelRunDir, 'models', 'combined', 'tidas_bundle', 'lifecyclemodels');
-  if (!fs.existsSync(modelsDir)) {
-    console.error(`run-patent-to-lifecyclemodel: missing built model dir ${modelsDir}; run Stage 5 first`);
+  let modelFileAbs;
+  try {
+    modelFileAbs = findBuiltLifecyclemodelFile(lifecyclemodelRunDir);
+  } catch (error) {
+    console.error(`run-patent-to-lifecyclemodel: ${error.message}`);
     process.exit(2);
   }
-  const modelFile = fs.readdirSync(modelsDir).find((f) => f.endsWith('.json'));
-  if (!modelFile) { console.error('run-patent-to-lifecyclemodel: no built lifecyclemodel found'); process.exit(2); }
+  const modelFile = path.basename(modelFileAbs);
   const [modelUuid, versionWithExt] = modelFile.split('_');
   const modelVersion = versionWithExt.replace(/\.json$/, '');
-  const modelFileAbs = path.join(modelsDir, modelFile);
 
   const sourceSlug = (plan.source?.id || 'source').toLowerCase();
   const processNodes = plan.processes.map((p) => ({
@@ -197,9 +223,59 @@ if (runStage6) {
     '--publish-lifecyclemodels', '--publish-resulting-process-relations', '--json']);
 }
 
+// ---------- Stage 7: Standard publish handoff ----------
+const publishRequestPath = publishRequestArg
+  ? path.resolve(process.cwd(), publishRequestArg)
+  : path.join(base, 'publish-request.json');
+const publishRunDir = publishOutDirArg
+  ? path.resolve(process.cwd(), publishOutDirArg)
+  : path.join(base, 'publish-run');
+if (publishToDb) {
+  const publishBundlePath = path.join(orchestratorRunDir, 'publish-bundle.json');
+  if (!fs.existsSync(publishBundlePath)) {
+    console.error(`run-patent-to-lifecyclemodel: missing ${publishBundlePath}; run Stage 6 before publish`);
+    process.exit(2);
+  }
+
+  const maxAttempts = publishMaxAttemptsArg == null ? 5 : Number(publishMaxAttemptsArg);
+  const retryDelaySeconds = publishRetryDelayArg == null ? 2 : Number(publishRetryDelayArg);
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    console.error('run-patent-to-lifecyclemodel: --publish-max-attempts must be an integer >= 1');
+    process.exit(2);
+  }
+  if (!Number.isFinite(retryDelaySeconds) || retryDelaySeconds < 0) {
+    console.error('run-patent-to-lifecyclemodel: --publish-retry-delay-seconds must be a number >= 0');
+    process.exit(2);
+  }
+
+  writePatentPublishRequest(publishRequestPath, base, {
+    commit: commitPublish,
+    outDir: publishRunDir,
+    maxAttempts,
+    retryDelaySeconds,
+  });
+  if (!jsonMode) console.error(`[stage7] wrote ${publishRequestPath}`);
+
+  const publishInvocation = buildTiangongInvocation([
+    'publish',
+    'run',
+    '--input',
+    publishRequestPath,
+    commitPublish ? '--commit' : '--dry-run',
+    '--json',
+  ], { repoRoot: projectRoot });
+  runCommand(
+    commitPublish ? 'stage7:tiangong publish commit' : 'stage7:tiangong publish dry-run',
+    publishInvocation.command,
+    publishInvocation.args,
+  );
+}
+
 if (jsonMode) {
   process.stdout.write(JSON.stringify({
     schema_version: 1, status: 'completed', base,
     lifecyclemodel_run: lifecyclemodelRunDir, orchestrator_run: orchestratorRunDir,
+    publish_request: publishToDb ? publishRequestPath : null,
+    publish_run: publishToDb ? publishRunDir : null,
   }) + '\n');
 }

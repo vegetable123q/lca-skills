@@ -6,9 +6,9 @@
 //   flows/NN-<proc_key>.json
 //   runs/<proc_key>/                              (via process-automated-builder auto-build)
 //   uuids.json
-//   runs/combined/exports/processes/<uuid>_<ver>.json
-//   runs/combined/cache/process_from_flow_state.json          (copied)
-//   runs/combined/manifests/*.json                            (copied)
+//   runs/<SOURCE>-combined/exports/processes/<uuid>_<ver>.json
+//   runs/<SOURCE>-combined/cache/process_from_flow_state.json          (copied)
+//   runs/<SOURCE>-combined/manifests/*.json                            (copied)
 //   manifests/lifecyclemodel-manifest.json
 //
 // The LLM never touches the ILCD template, allocate-uuids flags, or manifest
@@ -26,6 +26,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildCombinedProcessFromFlowState } from './combined-state.mjs';
+import { combinedRunNameFromSourceId } from './run-names.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const skillDir = path.dirname(path.dirname(__filename));
@@ -122,7 +124,7 @@ writeJson(path.join(base, 'uuids.json'), uuids);
   const blackBoxNote = isBlackBoxProcess(proc)
     ? prefixOnce(
         'Black-box process;',
-        'item-based exchanges are used because the source does not disclose defensible material quantities.',
+        'item-based exchanges are used because critical quantitative inventory data are missing.',
       )
     : '';
   const flowFile = {
@@ -166,17 +168,18 @@ const procBuilderScript = path.join(projectRoot, 'process-automated-builder', 's
   }
 });
 
-// ---------- 4. Build ILCD processDataSet files into runs/combined ----------
-const combinedDir = path.join(base, 'runs', 'combined');
+// ---------- 4. Build ILCD processDataSet files into one source-specific combined run ----------
+const combinedRunName = combinedRunNameFromSourceId(plan.source?.id);
+const combinedDir = path.join(base, 'runs', combinedRunName);
 const combinedExports = path.join(combinedDir, 'exports', 'processes');
 ensureDir(combinedExports);
 ensureDir(path.join(combinedDir, 'cache'));
 ensureDir(path.join(combinedDir, 'manifests'));
 
-// copy state + manifests from the first scaffold run
+// copy manifests from the first scaffold run, then write a combined state whose
+// final flow summary points at the model reference output. The lifecyclemodel
+// builder uses this summary for reference-process selection and display text.
 const firstRunDir = path.join(base, 'runs', `01-${plan.processes[0].key}`);
-const stateSrc = path.join(firstRunDir, 'cache', 'process_from_flow_state.json');
-if (fs.existsSync(stateSrc)) fs.copyFileSync(stateSrc, path.join(combinedDir, 'cache', 'process_from_flow_state.json'));
 const firstManifestsDir = path.join(firstRunDir, 'manifests');
 if (fs.existsSync(firstManifestsDir)) {
   for (const name of fs.readdirSync(firstManifestsDir)) {
@@ -185,6 +188,10 @@ if (fs.existsSync(firstManifestsDir)) {
     }
   }
 }
+writeJson(
+  path.join(combinedDir, 'cache', 'process_from_flow_state.json'),
+  buildCombinedProcessFromFlowState(plan, uuids),
+);
 
 const VERSION = '00.00.001';
 const sourceUuid = uuids.srcs.patent;
@@ -197,7 +204,7 @@ function buildIlcd(proc) {
     ? prefixOnce('Black-box process.', proc.comment || '')
     : proc.comment || '';
   const technologyDescription = blackBox
-    ? `${proc.technology || ''} Black-box note: item-based exchanges are used because the source does not disclose defensible material quantities.`
+    ? `${proc.technology || ''} Black-box note: item-based exchanges are used because critical quantitative inventory data are missing.`
     : proc.technology || '';
   let internalCounter = 0;
   const nextId = () => String(internalCounter++);
@@ -253,11 +260,15 @@ function buildIlcd(proc) {
         '@version': '01.00.000',
         'common:shortDescription': [{ '@xml:lang': 'en', '#text': targetFlow.name_en || targetKey }],
       },
+      referenceUnit: targetFlow.unit || 'kg',
       exchangeDirection: direction,
       meanAmount: amount,
       resultingAmount: amount,
       dataDerivationTypeStatus: x.derivation || (direction === 'Output' ? 'Measured' : 'Estimated'),
     };
+    if (direction === 'Output' && x.flow === refFlowKey) {
+      exch.quantitativeReference = true;
+    }
     if (commentBits.length) {
       exch['common:generalComment'] = [{ '@xml:lang': 'en', '#text': commentBits.join('; ') }];
     }
@@ -303,7 +314,7 @@ function buildIlcd(proc) {
         LCIMethodAndAllocation: {
           typeOfDataSet: 'Unit process, single operation',
           LCIMethodPrinciple: 'Attributional',
-          deviationsFromLCIMethodPrinciple: [{ '@xml:lang': 'en', '#text': blackBox ? 'Black-box process; item-based exchanges used because quantitative material inputs are not disclosed.' : 'None' }],
+          deviationsFromLCIMethodPrinciple: [{ '@xml:lang': 'en', '#text': blackBox ? 'Black-box process; item-based exchanges used because critical quantitative inventory data are missing.' : 'None' }],
           LCIMethodApproaches: ['Allocation - mass'],
           deviationsFromLCIMethodApproaches: [{ '@xml:lang': 'en', '#text': blackBox ? 'Black-box process; do not interpret item-based exchanges as mass-balanced inventory.' : 'None' }],
         },

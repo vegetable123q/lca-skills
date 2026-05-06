@@ -66,7 +66,8 @@
     "Amounts are per 1 unit of the process's reference output.",
     "derivation=Measured: the source text gives this exact quantity. derivation=Calculated: derived from source-given molar ratios/formulas/recipe fractions — MUST supply calc_note. derivation=Estimated: defaulted from engineering models (electricity/water/O2/waste should come from estimate-utilities.mjs).",
     "For Estimated electricity/water/O2/waste exchanges, copy the estimator formula_ref and any source_ref into the exchange; materialize-from-plan carries those fields into ILCD generalComment.",
-    "If a process is black_box=true because material quantities are not defensible, every flow used by that process must use unit=item and every exchange amount must be 1. Downstream processes consuming an item-unit flow inherit that item-based treatment.",
+    "Black-box is last resort: set black_box=true only when critical material, product, or operation data needed for a defensible inventory are missing after trying Measured, Calculated, and Estimated derivations. Never mark a whole patent route black-box just because some exchanges are missing.",
+    "If a process is black_box=true because critical data are missing, every flow used by that black-box process must use unit=item and every exchange amount must be 1. Downstream processes consuming an item-unit flow inherit that item-based treatment.",
     "pure_oxygen=true is required to declare any O2 input (flow key containing 'o2' or 'oxygen'). Only set it when the source explicitly names a pure-O2 atmosphere.",
     "canonical_flow_key lets a flow (e.g. 'coso4_7h2o' hydrate) emit as another flow (e.g. 'coso4' anhydrous) with amount multiplied by conversion_factor (e.g. 154.99/281.10 ≈ 0.551). Both flows must be declared in this flows{} map; the canonical one is the form that actually enters the ILCD dataset.",
     "Omit _comment and _rules in the actual plan; they are illustrative only."

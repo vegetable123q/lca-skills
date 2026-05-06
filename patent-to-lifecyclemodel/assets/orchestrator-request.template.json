@@ -20,7 +20,7 @@
     },
     "projector": {
       "command": "build",
-      "model_file": "<ABSOLUTE path to lifecyclemodel-run/models/combined/tidas_bundle/lifecyclemodels/<MODEL_UUID>_01.01.000.json>",
+      "model_file": "<ABSOLUTE path to lifecyclemodel-run/models/<SOURCE>-combined/tidas_bundle/lifecyclemodels/<MODEL_UUID>_01.01.000.json>",
       "projection_role": "primary"
     }
   },

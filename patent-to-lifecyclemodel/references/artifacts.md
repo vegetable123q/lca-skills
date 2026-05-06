@@ -19,7 +19,7 @@ output/<SOURCE>/
 │   │   └── reports/        process-auto-build-report.json
 │   ├── 02-<layer>/                           (same shape)
 │   ├── 03-<layer>/                           (same shape)
-│   └── combined/                             [Stage 4, authored here]
+│   └── <SOURCE>-combined/                    [Stage 4, authored here]
 │       ├── exports/
 │       │   └── processes/  <PROC_UUID>_<version>.json × N   ← hand-authored ILCD datasets
 │       ├── cache/          process_from_flow_state.json     ← copied from 01-<layer>/cache/
@@ -33,22 +33,27 @@ output/<SOURCE>/
 │   ├── selection/          selection-brief.md
 │   ├── discovery/          reference-model-summary.json
 │   ├── manifests/          invocation-index.json, run-manifest.json
-│   ├── models/combined/
+│   ├── models/<SOURCE>-combined/
 │   │   ├── tidas_bundle/lifecyclemodels/<MODEL_UUID>_<version>.json   ← the json_ordered
 │   │   ├── summary.json
 │   │   ├── connections.json       ← read this to verify edge inference
 │   │   └── process-catalog.json
 │   └── reports/            lifecyclemodel-auto-build-report.json
 ├── orchestrator-request.json                 [Stage 6, authored here]
-└── orchestrator-run/                         [Stage 6] — owned by lifecyclemodel-recursive-orchestrator
+├── orchestrator-run/                         [Stage 6] — owned by lifecyclemodel-recursive-orchestrator
+│   ├── request.normalized.json
+│   ├── assembly-plan.json
+│   ├── graph-manifest.json
+│   ├── lineage-manifest.json
+│   ├── boundary-report.json
+│   ├── invocations/         <per-node invocation logs>
+│   ├── publish-bundle.json
+│   └── publish-summary.json                   ← local publish-prep success marker
+├── publish-request.json                      [Stage 7, authored here] — tiangong publish request
+└── publish-run/                              [Stage 7] — owned by tiangong publish run
     ├── request.normalized.json
-    ├── assembly-plan.json
-    ├── graph-manifest.json
-    ├── lineage-manifest.json
-    ├── boundary-report.json
-    ├── invocations/         <per-node invocation logs>
-    ├── publish-bundle.json
-    └── publish-summary.json                   ← final success marker
+    ├── publish-report.json
+    └── relation-manifest.json                  ← when relation_mode stays local_manifest_only
 ```
 
 ## Quick verification checklist
@@ -64,6 +69,11 @@ After Stage 6:
 cat output/<SOURCE>/orchestrator-run/publish-summary.json
 ```
 
+After Stage 7:
+```bash
+cat output/<SOURCE>/publish-run/publish-report.json
+```
+
 ## What belongs to whom
 
 | Dir / file | Owner skill | Editable by hand? |
@@ -71,8 +81,10 @@ cat output/<SOURCE>/orchestrator-run/publish-summary.json
 | `flows/*.json` | this skill | yes (Stage 1) |
 | `uuids.json` | this skill | yes, but regenerate via helper |
 | `runs/<layer>/` (scaffold) | `process-automated-builder` | no (regenerate via Stage 2) |
-| `runs/combined/exports/processes/*.json` | this skill | yes (Stage 4) |
-| `runs/combined/{cache,manifests}` | copied from scaffold | no |
+| `runs/<SOURCE>-combined/exports/processes/*.json` | this skill | yes (Stage 4) |
+| `runs/<SOURCE>-combined/{cache,manifests}` | copied from scaffold | no |
 | `lifecyclemodel-run/**` | `lifecyclemodel-automated-builder` | no (regenerate via Stage 5) |
 | `orchestrator-request.json` | this skill | yes (Stage 6) |
 | `orchestrator-run/**` | `lifecyclemodel-recursive-orchestrator` | no (regenerate via Stage 6) |
+| `publish-request.json` | this skill | yes (Stage 7) |
+| `publish-run/**` | `tiangong publish run` | no (regenerate via Stage 7) |

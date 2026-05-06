@@ -14,6 +14,6 @@
     "emit_validation_report": true
   },
   "local_runs": [
-    "<ABSOLUTE path to output/<SOURCE>/runs/combined>"
+    "<ABSOLUTE path to output/<SOURCE>/runs/<SOURCE>-combined>"
   ]
 }

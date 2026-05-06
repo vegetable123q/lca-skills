@@ -1,21 +1,13 @@
 ---
 name: patent-to-lifecyclemodel
-description: Turn a patent or SOP text into a complete TianGong TIDAS lifecyclemodel. Use when the user hands you descriptive text ("extract a Lifecyclemodel from this patent", "将 <document> 抽取为一个完整的 Lifecyclemodel") and has no pre-existing flow or process datasets. Composes process-automated-builder, lifecyclemodel-automated-builder, and lifecyclemodel-recursive-orchestrator through a local-only pipeline.
+description: Convert a patent or SOP into a TianGong TIDAS lifecyclemodel by authoring one plan, generating process datasets, building the lifecyclemodel, and optionally publishing through the unified tiangong CLI.
 ---
 
-# Patent -> Lifecyclemodel SOP
+# Patent -> Lifecyclemodel
 
-Composition skill. Reuses existing builder skills; it does not re-implement their logic.
+Thin wrapper. Author `output/<SOURCE>/plan.json`; the driver delegates build and publish work to existing CLI-backed skills.
 
-## Default path
-
-After one pass over the source document, author only:
-
-```text
-output/<SOURCE>/plan.json
-```
-
-Use `assets/plan.template.json`, then run:
+## Run
 
 ```bash
 node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
@@ -24,9 +16,32 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --all --json
 ```
 
-The driver runs `normalize-plan` -> `materialize-from-plan` -> `lifecyclemodel-automated-builder build` -> auto-generated `orchestrator-request.json` -> `lifecyclemodel-recursive-orchestrator` plan/execute/publish.
+Publish only when explicitly requested:
 
-## Minimum plan shape
+```bash
+node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
+  --base output/<SOURCE> \
+  --publish-only --commit --json
+```
+
+Stage 7 writes `publish-request.json` and calls `tiangong publish run`; do not add remote-write logic inside this skill.
+
+## Plan Rules
+
+- Split the patent route into one process per defensible unit operation.
+- Reuse the same `flow_key` for an upstream output and downstream input; this creates lifecyclemodel edges.
+- Use normal physical units such as `kg`, `L`, `mol`, `kWh`, and `m3`; reserve `item` for unavoidable black-box processes.
+- `Measured` means directly stated. `Calculated` means source-derived; add `calc_note`. `Estimated` means source missing; add `formula_ref` or `source_ref`.
+- Use patent masses, volumes, concentrations, ratios, yields, residence times, temperatures, and flow rates before estimating.
+- Use `scripts/estimate-utilities.mjs` for estimated electricity, water, O2, waste, and emissions.
+- Set `pure_oxygen: true` only when the source explicitly names pure O2.
+- Default to `black_box: false`. Use `black_box: true` only when critical material, product, or operation data are still missing after measured/calculated/estimated modeling.
+- Never mark a whole patent route black-box because some exchanges are missing. Split the route and black-box only the specific step with the critical gap.
+- If black-box is unavoidable, every flow used by that process must have `unit: "item"`, every exchange amount must be `1`, and `comment` must name the missing critical data.
+- Declare hydrate/alias conversions with `canonical_flow_key` and `conversion_factor`.
+- Keep coated, doped, and composite products as composites; do not collapse them into pure phases.
+
+## Minimum Plan
 
 ```jsonc
 {
@@ -35,82 +50,35 @@ The driver runs `normalize-plan` -> `materialize-from-plan` -> `lifecyclemodel-a
   "geography": "CN",
   "reference_year": "2019",
   "flows": { "<flow_key>": { "name_en": "...", "name_zh": "...", "unit": "kg" } },
-  "processes": [
-    {
-      "key": "<proc_key>",
-      "step_id": "S1",
-      "name_en": "...",
-      "name_zh": "...",
-      "classification": ["..."],
-      "technology": "...",
-      "comment": "...",
-      "black_box": false,
-      "pure_oxygen": false,
-      "reference_output_flow": "<product_output_flow_key>",
-      "inputs": [{ "flow": "<flow_key>", "amount": 0, "derivation": "Measured|Calculated|Estimated" }],
-      "outputs": [{ "flow": "<flow_key>", "amount": 1, "derivation": "Measured" }]
-    }
-  ]
+  "processes": [{
+    "key": "<proc_key>",
+    "step_id": "S1",
+    "name_en": "...",
+    "classification": ["..."],
+    "technology": "...",
+    "black_box": false,
+    "pure_oxygen": false,
+    "reference_output_flow": "<product_flow_key>",
+    "inputs": [{ "flow": "<flow_key>", "amount": 0, "derivation": "Measured|Calculated|Estimated" }],
+    "outputs": [{ "flow": "<flow_key>", "amount": 1, "derivation": "Measured" }]
+  }]
 }
 ```
-
-Edge rule: use the same `flow_key` as upstream Output and downstream Input. No other glue creates lifecyclemodel edges.
-
-## Authoring rules
-
-- `Measured`: source text gives the exact quantity.
-- `Calculated`: derived from source-given ratios, formulas, concentrations, flow rates, or times. Add `calc_note`.
-- `Estimated`: source is silent. Electricity, water, O2, waste, and emissions must come from `scripts/estimate-utilities.mjs`; copy `formula_ref` and any `source_ref` to the exchange.
-- O2 inputs require `pure_oxygen: true` on the process, and only when the source explicitly names a pure-O2 atmosphere.
-- Water wash normally needs a paired `wastewater` output of the same magnitude.
-- Hydrate/anhydrous aliases use `canonical_flow_key` plus `conversion_factor`; declare both flows in `flows`.
-- Composite, coated, or doped final products are not single pure phases. Do stoichiometry on the last uncoated intermediate, then mass-balance coating/doping separately.
-- If quantities are not defensible, set `black_box: true`, use only `unit: "item"` flows in that process, set every exchange amount to `1`, and explain why in `comment`.
-- Local-only. Do not remote publish from this skill; hand off to `lca-publish-executor` after review.
-
-## Utility estimator
-
-```bash
-node patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode electricity --params '<json>'
-node patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode water --params '<json>'
-node patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode oxygen --params '<json>'
-node patent-to-lifecyclemodel/scripts/estimate-utilities.mjs --mode waste --params '<json>'
-```
-
-Use patent data first. EIA auxiliary modes are only for missing utility/waste quantities on operations already named by the patent.
 
 ## Verify
 
 ```bash
-jq '{process_count, edge_count, multiplication_factors}' \
-  output/<SOURCE>/lifecyclemodel-run/models/combined/summary.json
+jq '{process_count, edge_count}' \
+  output/<SOURCE>/lifecyclemodel-run/models/<SOURCE>-combined/summary.json
 cat output/<SOURCE>/orchestrator-run/publish-summary.json
+cat output/<SOURCE>/publish-run/publish-report.json
 ```
 
-Success: `edge_count == processes - 1` for a linear chain, or higher for branched systems; `publish-summary.lifecyclemodel_count >= 1`.
+Expected: process count matches the plan, edges connect shared flows, no publish failures, and no black-box process unless the plan documents a critical data gap.
 
-## Read on demand
+## References
 
-- `references/conversion-guide.zh-CN.md` - detailed Chinese explanation, formulas, references, and improvement list.
-- `references/workflow.md` - stage-by-stage recipe and manual fallback.
-- `references/pitfalls.md` - compact troubleshooting table.
-- `references/artifacts.md` - output ownership map.
-
-## Fast triage
-
-| Symptom | Fix |
-| --- | --- |
-| `edge_count: 0` | Reuse the same `flow_key` between upstream output and downstream input. |
-| `built_model_count: N` | Driver was bypassed; use `--plan` and the combined run. |
-| `run root already exists` | Remove generated dirs: `output/<SOURCE>/{artifacts,flows,runs,manifests,lifecyclemodel-run,orchestrator-run,orchestrator-request.json,uuids.json}`. |
-| `relation_count: 0` | Stage 5 did not produce a model; inspect `lifecyclemodel-run/` logs. |
-| `derivation=Calculated but no calc_note` | Add `calc_note` or switch to `Estimated`. |
-| O2 validation failure | Set `pure_oxygen: true` only if the source says pure O2; otherwise remove O2. |
-| `unit=item requires amount=1` | Set every exchange of that item flow to amount `1`. |
-| `canonical_flow_key ... not found` | Declare both alias and canonical flows in `plan.flows`. |
-
-## When not to use
-
-- ILCD process datasets already exist -> `lifecyclemodel-automated-builder`.
-- Lifecyclemodel exists and needs a resulting process -> `lifecyclemodel-resulting-process-builder`.
-- Remote publish -> `lca-publish-executor`.
+- `references/conversion-guide.zh-CN.md`
+- `references/workflow.md`
+- `references/pitfalls.md`
+- `references/artifacts.md`

@@ -15,11 +15,12 @@ Read the source document ONCE and produce `output/<SOURCE>/plan.json` from `asse
 - goal (functional unit, boundary)
 - every distinct flow that appears as an input, output, or intermediate
 - one entry in `processes[]` per unit operation, with `inputs`, `outputs`, `reference_output_flow`, `classification`, `technology`, `comment`, `step_id`
-- if a process exists but its material quantities are not defensible, set `black_box: true`, switch that process's flows to `unit: "item"`, and state the black-box rationale in `comment`
+- keep processes non-black-box when exchanges can be measured, calculated, or estimated from the patent and estimator scripts
+- set `black_box: true` only when critical material, product, or operation data remain missing and the specific unit operation cannot form a defensible inventory
 
 **Edge convention:** reuse the same `flow_key` as upstream Output and downstream Input. That is the ONLY thing that produces edges downstream.
 
-**Black-box convention:** `black_box: true` is a semantic fallback, not a topology change. Edges still come only from shared `flow_key`. The generated ILCD dataset will stay structurally valid, but its comments will state that the process is item-based and black-box because the source omitted quantitative inventory detail.
+**Black-box convention:** `black_box: true` is a last-resort semantic fallback, not a topology change. Do not mark a whole patent route black-box because some exchanges are missing; split the route and black-box only the unit operation with the critical data gap. Edges still come only from shared `flow_key`. The generated ILCD dataset will stay structurally valid, but its comments will state that the process is item-based and black-box because critical quantitative inventory data are missing.
 
 Do not re-read the source after `plan.json` is committed. Everything downstream reads only `plan.json`.
 
@@ -42,18 +43,19 @@ What it runs:
    - `flows/NN-<proc_key>.json` per process
    - `uuids.json` (one UUID per `flow_key` + one per `proc_key` + one source UUID)
    - `runs/<NN>-<proc_key>/` via `process-automated-builder auto-build`
-   - `runs/combined/exports/processes/<proc_uuid>_<ver>.json` per process (ILCD)
-   - `runs/combined/{cache,manifests}/*` copied from the first scaffold run
+   - `runs/<SOURCE>-combined/exports/processes/<proc_uuid>_<ver>.json` per process (ILCD)
+   - `runs/<SOURCE>-combined/{cache,manifests}/*` copied from the first scaffold run
    - `manifests/lifecyclemodel-manifest.json`
 3. `lifecyclemodel-automated-builder build` → `lifecyclemodel-run/…/tidas_bundle/lifecyclemodels/<model_uuid>_<ver>.json`
 4. Driver reads Stage 3 output + normalized `plan.json` + `uuids.json` → writes `orchestrator-request.json`
 5. `lifecyclemodel-recursive-orchestrator` plan → execute → publish → `orchestrator-run/publish-summary.json`
+6. Optional publish execution: driver writes `publish-request.json` from `orchestrator-run/publish-bundle.json` and delegates to `tiangong publish run`.
 
 ### Stage C — Verify
 
 ```bash
 jq '{process_count, edge_count, multiplication_factors}' \
-   output/<SOURCE>/lifecyclemodel-run/models/combined/summary.json
+   output/<SOURCE>/lifecyclemodel-run/models/<SOURCE>-combined/summary.json
 cat output/<SOURCE>/orchestrator-run/publish-summary.json
 ```
 
@@ -61,9 +63,26 @@ Success: `edge_count == processes-1` (linear chain) or higher (branched), `publi
 
 If one process is black-box, also inspect the generated process dataset comment and confirm it includes the black-box note.
 
-### Stage D — (Optional) Remote publish
+### Stage D — Optional database publish
 
-Out of scope; see `lca-publish-executor`.
+After reviewing Stage C outputs, publish the generated bundle through the unified CLI:
+
+```bash
+node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
+  --base output/<SOURCE> \
+  --publish-only --commit --json
+```
+
+For a single full command from `plan.json` through publish:
+
+```bash
+node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
+  --plan output/<SOURCE>/plan.json \
+  --base output/<SOURCE> \
+  --all --publish-to-db --commit --json
+```
+
+Without `--commit`, Stage D creates a dry-run publish request. Stage D never writes directly; it delegates `publish-request.json` to `tiangong publish run`.
 
 ## Manual path (fallback)
 
@@ -83,10 +102,11 @@ Use only if the plan format cannot express the process (unusual structures, side
    node patent-to-lifecyclemodel/scripts/allocate-uuids.mjs \
      --flows mofs,ncm_oxide,... --processes mofs_proc,... > output/<SOURCE>/uuids.json
    ```
-4. Author `runs/combined/exports/processes/<uuid>_<ver>.json` from `assets/processDataSet.template.json` for each layer; consolidate all datasets into the single `runs/combined/` dir. Copy `cache/process_from_flow_state.json` and `manifests/*.json` from any scaffold run into `runs/combined/`.
-5. Write `manifests/lifecyclemodel-manifest.json` from `assets/lifecyclemodel-manifest.template.json` pointing at `runs/combined/`.
+4. Author `runs/<SOURCE>-combined/exports/processes/<uuid>_<ver>.json` from `assets/processDataSet.template.json` for each layer; consolidate all datasets into the single source-specific combined dir. Copy `cache/process_from_flow_state.json` and `manifests/*.json` from any scaffold run into `runs/<SOURCE>-combined/`.
+5. Write `manifests/lifecyclemodel-manifest.json` from `assets/lifecyclemodel-manifest.template.json` pointing at `runs/<SOURCE>-combined/`.
 6. Write `orchestrator-request.json` from `assets/orchestrator-request.template.json`.
-7. Run Stages 5 and 6:
+7. Run Stages 5 and 6, then optional Stage D:
    ```bash
    node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/<SOURCE> --all --json
+   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/<SOURCE> --publish-only --commit --json
    ```
