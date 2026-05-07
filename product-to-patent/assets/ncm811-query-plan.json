@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "NCM811 cathode active material",
+    "description": "Nickel-rich lithium nickel cobalt manganese oxide cathode material with nominal composition LiNi0.8Co0.1Mn0.1O2.",
+    "target_use": "Select patent sources that disclose a preparation route suitable for lifecyclemodel conversion."
+  },
+  "aliases": [
+    "NCM811",
+    "NMC811",
+    "LiNi0.8Co0.1Mn0.1O2",
+    "LiNi0.8Co0.1Mn0.1O2 cathode",
+    "nickel-rich 811 cathode"
+  ],
+  "queries": [
+    {
+      "id": "q1-exact-preparation",
+      "query": "\"NCM811\" cathode \"preparation method\"",
+      "intent": "Find direct NCM811 cathode preparation patents."
+    },
+    {
+      "id": "q2-alias-coating",
+      "query": "(\"NCM811\" OR \"NMC811\") (\"positive electrode\" OR cathode) coating",
+      "intent": "Find coating and surface modification patents that still disclose preparation data."
+    },
+    {
+      "id": "q3-formula",
+      "query": "\"LiNi0.8Co0.1Mn0.1O2\" \"preparation method\"",
+      "intent": "Find formula-based patents that may not use the NCM811 abbreviation."
+    },
+    {
+      "id": "q4-precursor",
+      "query": "\"NCM811\" precursor calcination",
+      "intent": "Find precursor and sintering route disclosures."
+    },
+    {
+      "id": "q5-nickel-rich",
+      "query": "\"nickel-rich\" \"811\" cathode material",
+      "intent": "Recover patents using generic nickel-rich language."
+    }
+  ],
+  "review_thresholds": {
+    "minimum_process_parameters": [
+      "precursor or reagent identity",
+      "mass, molar ratio, concentration, or feed ratio",
+      "temperature",
+      "time or residence time",
+      "atmosphere or gas condition when calcination is used"
+    ],
+    "family_handling": "Group by family before ranking; choose one representative patent unless family members add distinct lifecycle-relevant examples."
+  },
+  "seed_publications": [
+    {
+      "publication_number": "CN113264560A",
+      "title_hint": "Double-coated NCM811 cathode material and preparation method thereof"
+    },
+    {
+      "publication_number": "CN113224310A",
+      "title_hint": "Coating NCM811 cathode material and preparation method thereof"
+    },
+    {
+      "publication_number": "CN112479266A",
+      "title_hint": "Preparation method of spherical NCM811 cathode material"
+    },
+    {
+      "publication_number": "CN111224089A",
+      "title_hint": "Ternary cathode material NCM811 prepared by molten salt method"
+    },
+    {
+      "publication_number": "US11942638B2",
+      "title_hint": "Nickel-rich layered oxide cathode materials for Li ion batteries"
+    },
+    {
+      "publication_number": "CN107910534A",
+      "title_hint": "Preparation method of NCM811 type nickel-rich ternary cathode material"
+    },
+    {
+      "publication_number": "KR20200079022A",
+      "title_hint": "Cathode materials for lithium ion battery coated dimethoxydimethylsilane"
+    },
+    {
+      "publication_number": "CN114455646A",
+      "title_hint": "NCM811 positive electrode material precursor and preparation method"
+    }
+  ]
+}

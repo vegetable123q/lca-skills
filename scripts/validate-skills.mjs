@@ -21,6 +21,7 @@ const defaultSkillNames = [
   'lifecyclemodel-hybrid-search',
   'embedding-ft',
   'patent-to-lifecyclemodel',
+  'product-to-patent',
   'process-automated-builder',
   'lifecyclemodel-automated-builder',
   'lifecyclemodel-resulting-process-builder',

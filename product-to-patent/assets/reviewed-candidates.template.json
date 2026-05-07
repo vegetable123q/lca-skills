@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "",
+    "description": ""
+  },
+  "metadata_runs": [
+    {
+      "query_id": "",
+      "query": "",
+      "metadata_file": "",
+      "public_url": ""
+    }
+  ],
+  "selected_families": [
+    {
+      "decision": "ready_for_lifecyclemodel",
+      "representative_publication_number": "",
+      "representative_url": "",
+      "pdf_url": "",
+      "title": "",
+      "assignee": "",
+      "priority_date": "",
+      "family_members": [],
+      "alternate_links": [],
+      "relevance_rationale": "",
+      "process_disclosure": {
+        "materials": [],
+        "unit_operations": [],
+        "quantitative_parameters": [],
+        "missing_data": []
+      },
+      "family_review_note": "",
+      "handoff": {
+        "target_skill": "patent-to-lifecyclemodel",
+        "source_id": "",
+        "notes": ""
+      }
+    }
+  ],
+  "rejected_candidates": [
+    {
+      "publication_number": "",
+      "url": "",
+      "reason": ""
+    }
+  ]
+}

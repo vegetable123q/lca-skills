@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product to Patent"
+  short_description: "Find candidate patents from a product description"
+  default_prompt: "Use $product-to-patent to find and triage Google Patents candidates for an NCM811 cathode product, deduplicate patent families, and prepare reviewed source links for downstream patent-to-lifecyclemodel work."
