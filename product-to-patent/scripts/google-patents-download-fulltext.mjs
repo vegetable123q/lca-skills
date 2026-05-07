@@ -6,6 +6,10 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const googlePatentsOrigin = 'https://patents.google.com';
+const patentImagesHost = 'patentimages.storage.googleapis.com';
+const imageExtensionPattern = /\.(?:png|jpe?g|gif|webp|svg)(?:[?#].*)?$/iu;
+const processDiagramPattern =
+  /\b(flow\s*chart|flow\s*diagram|process\s*(?:flow|diagram|route|schematic)|manufactur(?:ing|e)\s*(?:flow|process|diagram)|prepar(?:ation|ing)\s*(?:flow|process|diagram)|synthesis\s*(?:route|process|flow|diagram)|schematic\s*(?:diagram|view)|fig(?:ure)?\.?\s*\d+[^.\n]{0,120}\b(?:flow|process|prepar|manufactur|synthesis))\b|工艺流程|流程图|制备流程|生产流程|合成路线/iu;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -33,6 +37,8 @@ Options:
   --delay <seconds>        Delay between requests (default: 25)
   --retries <n>            Retries per strategy (default: 2)
   --no-pdf                 Skip PDF download attempts
+  --download-images        Download patent figure images discovered in page text
+  --image-mode <mode>      Image selection mode: flow or all (default: flow)
   --skip-existing          Skip publications that already have a non-empty file
   -h, --help               Show this help
 
@@ -42,6 +48,7 @@ Strategies (tried in order per publication):
   3. Direct fetch → patents.google.com/patent/{pub}/en (may be blocked)
   4. Jina Reader → patents.google.com/xhr/result?id=patent/{pub}/en
   5. PDF download (if URL available or discoverable)
+  6. Patent figure image download (only with --download-images)
 `.trim());
 }
 
@@ -75,6 +82,143 @@ function extractPdfLinkFromText(text) {
     if (match?.[1]) return match[1];
   }
   return '';
+}
+
+function isPatentImageUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname === patentImagesHost && imageExtensionPattern.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeImageUrl(value) {
+  try {
+    const parsed = new URL(value.replace(/&amp;/gu, '&'));
+    if (parsed.protocol !== 'https:') parsed.protocol = 'https:';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function getMatchContext(text, index, length, radius = 240) {
+  const start = Math.max(0, index - radius);
+  const end = Math.min(text.length, index + length + radius);
+  return text.slice(start, end).replace(/\s+/gu, ' ').trim();
+}
+
+function extractHtmlAttribute(tag, name) {
+  const pattern = new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`, 'iu');
+  return tag.match(pattern)?.[2]?.trim() ?? '';
+}
+
+function extractFigureCaptionMap(text) {
+  const captions = new Map();
+  const captionPattern =
+    /^\s*(?:fig(?:ure)?\.?\s*)(\d+)(?:\s*\([a-z]\))?\s*(?:is|shows|:|-)?\s+(.+)$/gimu;
+  for (const match of text.matchAll(captionPattern)) {
+    const figureNumber = match[1];
+    if (!figureNumber || captions.has(figureNumber)) continue;
+    captions.set(figureNumber, match[0].replace(/\s+/gu, ' ').trim());
+  }
+  return captions;
+}
+
+function filenameFromImageUrl(url, index) {
+  let basename = '';
+  try {
+    basename = path.basename(new URL(url).pathname);
+  } catch {
+    basename = '';
+  }
+  const safe = basename
+    .replace(/[^A-Za-z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 120);
+  return `${String(index + 1).padStart(2, '0')}-${safe || 'patent-figure'}`;
+}
+
+function isLikelyJinaThumbnailUrl(url) {
+  try {
+    return /^HDA[A-Z0-9]+\.png$/iu.test(path.basename(new URL(url).pathname));
+  } catch {
+    return false;
+  }
+}
+
+function captionForImageLabel(label, figureCaptions) {
+  const imageNumber = label.match(/\bImage\s+(\d+)\b/iu)?.[1];
+  if (!imageNumber) return '';
+  return figureCaptions.get(imageNumber) ?? '';
+}
+
+function addImageCandidate(candidates, text, url, index, label = '', figureCaptions = new Map()) {
+  const normalizedUrl = normalizeImageUrl(url);
+  if (!normalizedUrl || !isPatentImageUrl(normalizedUrl) || candidates.has(normalizedUrl)) return;
+  const figureCaption = captionForImageLabel(label, figureCaptions);
+  const context = [label, figureCaption, getMatchContext(text, index, url.length)].filter(Boolean).join(' ');
+  const genericImageLabel = /^\s*Image\s+\d+\s*$/iu.test(label);
+  const signalText = figureCaption || (genericImageLabel ? context : label) || context;
+  candidates.set(normalizedUrl, {
+    url: normalizedUrl,
+    label,
+    context,
+    likely_thumbnail: isLikelyJinaThumbnailUrl(normalizedUrl),
+    process_diagram_candidate: processDiagramPattern.test(signalText),
+  });
+}
+
+export function extractPatentFigureImageLinks(text, { mode = 'flow' } = {}) {
+  const candidates = new Map();
+  const figureCaptions = extractFigureCaptionMap(text);
+
+  const markdownImagePattern = /!\[([^\]]*)\]\((https:\/\/patentimages\.storage\.googleapis\.com\/[^)\s]+)\)/giu;
+  for (const match of text.matchAll(markdownImagePattern)) {
+    addImageCandidate(candidates, text, match[2], match.index ?? 0, match[1]?.trim() ?? '', figureCaptions);
+  }
+
+  const htmlImagePattern = /<img\b[^>]*>/giu;
+  for (const match of text.matchAll(htmlImagePattern)) {
+    const tag = match[0];
+    const label = [extractHtmlAttribute(tag, 'alt'), extractHtmlAttribute(tag, 'title')]
+      .filter(Boolean)
+      .join(' ');
+    addImageCandidate(candidates, text, extractHtmlAttribute(tag, 'src'), match.index ?? 0, label, figureCaptions);
+  }
+
+  const rawUrlPattern =
+    /https:\/\/patentimages\.storage\.googleapis\.com\/[^\s"'<>)]*\.(?:png|jpe?g|gif|webp|svg)(?:[?#][^\s"'<>)]*)?/giu;
+  for (const match of text.matchAll(rawUrlPattern)) {
+    addImageCandidate(candidates, text, match[0], match.index ?? 0, '', figureCaptions);
+  }
+
+  const images = [...candidates.values()].map((image, index) => ({
+    ...image,
+    suggested_filename: filenameFromImageUrl(image.url, index),
+  }));
+
+  if (mode === 'all') return images;
+
+  const processImages = images.filter(image => image.process_diagram_candidate);
+  const fullSizeFigures = images.filter(
+    image => !image.likely_thumbnail && /\bfig(?:ure)?\.?\b/iu.test(`${image.label} ${image.context}`),
+  );
+  if (
+    processImages.length > 0 &&
+    processImages.every(image => image.likely_thumbnail) &&
+    fullSizeFigures.length > 0
+  ) {
+    return fullSizeFigures.slice(0, processImages.length).map(image => ({
+      ...image,
+      process_diagram_candidate: true,
+      selection_reason: 'full-size figure selected instead of Jina thumbnail',
+    }));
+  }
+
+  return processImages;
 }
 
 function resolvePublications(options) {
@@ -263,6 +407,63 @@ async function tryPdfDownload(pdfUrl) {
   return { ok: true, buffer, format: 'pdf', source: 'pdf' };
 }
 
+async function tryImageDownload(imageUrl) {
+  console.log(`  [image] downloading ${imageUrl.slice(0, 80)}...`);
+
+  const response = await fetch(imageUrl, {
+    signal: AbortSignal.timeout(120000),
+    headers: { 'user-agent': 'tiangong-lca-skills/product-to-patent images' },
+  });
+  if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType && !contentType.startsWith('image/')) {
+    return { ok: false, error: `unexpected content-type ${contentType}` };
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length < 500) return { ok: false, error: `too small (${buffer.length}B)` };
+  return { ok: true, buffer, contentType };
+}
+
+export async function downloadPatentFigureImages(pubNum, imageLinks, outDir) {
+  if (imageLinks.length === 0) return [];
+
+  const imageDir = path.join(outDir, `${pubNum}-images`);
+  fs.mkdirSync(imageDir, { recursive: true });
+
+  const results = [];
+  for (let index = 0; index < imageLinks.length; index++) {
+    const image = imageLinks[index];
+    const fileName = filenameFromImageUrl(image.url, index);
+    const filePath = path.join(imageDir, fileName);
+    const result = await tryImageDownload(image.url);
+
+    if (result.ok) {
+      fs.writeFileSync(filePath, result.buffer);
+      console.log(`  ✓ image ${result.buffer.length} bytes → ${path.join(`${pubNum}-images`, fileName)}`);
+      results.push({
+        ...image,
+        status: 'ok',
+        file: path.join(`${pubNum}-images`, fileName),
+        bytes: result.buffer.length,
+        content_type: result.contentType,
+      });
+    } else {
+      console.log(`  ✗ image failed: ${result.error}`);
+      results.push({
+        ...image,
+        status: 'failed',
+        file: '',
+        bytes: 0,
+        error: result.error,
+      });
+    }
+  }
+
+  return results;
+}
+
 async function downloadPublication(pub, options) {
   const pubNum = pub.publication_number;
   const nativeLang = getNativeLang(pubNum);
@@ -314,6 +515,7 @@ async function run(options) {
 
   console.log(`Downloading full text for ${publications.length} publications → ${outDir}`);
   console.log(`Delay: ${options.delay}s | Retries: ${options.retries} | PDF: ${options.downloadPdf ? 'yes' : 'no'}`);
+  console.log(`Images: ${options.downloadImages ? options.imageMode : 'no'}`);
   console.log('');
 
   const results = [];
@@ -327,12 +529,28 @@ async function run(options) {
     if (options.skipExisting) {
       const mdPath = path.join(outDir, `${pubNum}.md`);
       const htmlPath = path.join(outDir, `${pubNum}.html`);
-      if (
-        (fs.existsSync(mdPath) && fs.statSync(mdPath).size > 1000) ||
-        (fs.existsSync(htmlPath) && fs.statSync(htmlPath).size > 1000)
-      ) {
+      const existingPath =
+        fs.existsSync(mdPath) && fs.statSync(mdPath).size > 1000
+          ? mdPath
+          : fs.existsSync(htmlPath) && fs.statSync(htmlPath).size > 1000
+            ? htmlPath
+            : '';
+      if (existingPath) {
         console.log('  skipped (already downloaded)');
-        results.push({ publication_number: pubNum, status: 'skipped', source: 'existing', bytes: 0 });
+        const existingContent = options.downloadImages ? fs.readFileSync(existingPath, 'utf8') : '';
+        const figureImageLinks = options.downloadImages
+          ? extractPatentFigureImageLinks(existingContent, { mode: options.imageMode })
+          : [];
+        const figureImages = options.downloadImages
+          ? await downloadPatentFigureImages(pubNum, figureImageLinks, outDir)
+          : [];
+        results.push({
+          publication_number: pubNum,
+          status: 'skipped',
+          source: 'existing',
+          bytes: 0,
+          figure_images: figureImages,
+        });
         continue;
       }
     }
@@ -361,12 +579,20 @@ async function run(options) {
         }
       }
 
+      const figureImageLinks = options.downloadImages
+        ? extractPatentFigureImageLinks(result.content ?? '', { mode: options.imageMode })
+        : [];
+      const figureImages = options.downloadImages
+        ? await downloadPatentFigureImages(pubNum, figureImageLinks, outDir)
+        : [];
+
       results.push({
         publication_number: pubNum,
         status: 'ok',
         source: result.source,
         format: result.format,
         bytes,
+        figure_images: figureImages,
       });
     } else {
       console.log(`  ✗ failed: ${result.error}`);
@@ -392,7 +618,13 @@ async function run(options) {
     succeeded: results.filter(r => r.status === 'ok').length,
     skipped: results.filter(r => r.status === 'skipped').length,
     failed: results.filter(r => r.status === 'failed').length,
-    options: { delay: options.delay, retries: options.retries, download_pdf: options.downloadPdf },
+    options: {
+      delay: options.delay,
+      retries: options.retries,
+      download_pdf: options.downloadPdf,
+      download_images: options.downloadImages,
+      image_mode: options.imageMode,
+    },
     results,
   };
 
@@ -411,6 +643,8 @@ function parseArgs(rawArgs) {
     delay: 25,
     retries: 2,
     downloadPdf: true,
+    downloadImages: false,
+    imageMode: 'flow',
     skipExisting: false,
   };
 
@@ -427,11 +661,15 @@ function parseArgs(rawArgs) {
       case '--out-dir':
       case '--delay':
       case '--retries':
+      case '--image-mode':
         if (i + 1 >= rawArgs.length) throw new Error(`${arg} requires a value`);
         options[arg.slice(2).replace(/-([a-z])/gu, (_, c) => c.toUpperCase())] = rawArgs[++i];
         break;
       case '--no-pdf':
         options.downloadPdf = false;
+        break;
+      case '--download-images':
+        options.downloadImages = true;
         break;
       case '--skip-existing':
         options.skipExisting = true;
@@ -443,6 +681,9 @@ function parseArgs(rawArgs) {
 
   options.delay = Number.parseInt(options.delay, 10);
   options.retries = Number.parseInt(options.retries, 10);
+  if (!['flow', 'all'].includes(options.imageMode)) {
+    throw new Error('--image-mode must be "flow" or "all"');
+  }
   return options;
 }
 

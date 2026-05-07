@@ -73,6 +73,36 @@ node product-to-patent/scripts/google-patents-metadata.mjs \
 - `detail.family_members`
 - `detail.cited_patents`, `detail.cited_by_patents`, `detail.similar_documents`
 
+## 图片与流程图
+
+针对 NCM811 阴极制造专利，下载页面图片是有意义的，但只应把它作为工艺披露的辅助证据。流程图、工艺路线图、制备流程示意图可能补全文本抽取容易丢失的单元操作顺序、包覆/掺杂路径、回流或后处理步骤；但 SEM/TEM 照片、电池结构图、性能曲线和网页装饰图片通常不能直接转成生命周期清单。
+
+全文下载时优先使用流程图模式：
+
+```bash
+node product-to-patent/scripts/google-patents-download-fulltext.mjs \
+  --metadata-file output/product-to-patent/ncm811-cathode/q1/google-patents-metadata.json \
+  --out-dir output/raw \
+  --delay 25 \
+  --download-images \
+  --image-mode flow \
+  --skip-existing
+```
+
+批量 NCM811 管线也支持同样的开关：
+
+```bash
+node product-to-patent/scripts/google-patents-batch-pipeline.mjs \
+  --out-dir output/raw \
+  --target-count 800 \
+  --max-depth 2 \
+  --download-delay 6 \
+  --download-images \
+  --image-mode flow
+```
+
+`--image-mode flow` 只下载带 process-flow、preparation-process、manufacturing-process、schematic 或中文“流程图/工艺流程”等信号的 Google PatentImages 图像，并写入 `download-summary.json` 的 `figure_images`。Jina Reader 经常在页面顶部暴露 120 px 高的 HDA 缩略图；如果同一页还有后续 full-size figure，下载器会优先保存 full-size 图，避免流程图过于模糊。如果需要人工审阅全部专利附图，再改用 `--image-mode all`；不要把所有图默认当成可建模流程证据。
+
 ## Patent Family
 
 Google Patents 搜索结果默认会折叠 simple patent family，因此 metadata 列表不是完整 family 清单。详情页中的 family、other versions、worldwide applications、same priority/application dates、标题/assignee 重合都需要综合判断。

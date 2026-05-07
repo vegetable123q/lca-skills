@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  extractPatentFigureImageLinks,
+} from '../product-to-patent/scripts/google-patents-download-fulltext.mjs';
+import {
   buildGooglePatentsSearchUrl,
   extractJinaReaderContent,
   flattenGooglePatentsResults,
@@ -180,4 +183,73 @@ test('relaxGooglePatentsQuery drops process phrases after product terms', () => 
 test('sanitizeDetailTextFilename keeps publication numbers path-safe', () => {
   assert.equal(sanitizeDetailTextFilename('CN 113/264:560 A'), 'CN-113-264-560-A.md');
   assert.equal(sanitizeDetailTextFilename(''), 'patent-detail.md');
+});
+
+test('extractPatentFigureImageLinks keeps flow-chart patent figures separate from other page images', () => {
+  const page = `
+    <img alt="Google logo" src="https://www.gstatic.com/logo.png">
+    ![FIG. 1 process flow chart for preparing NCM811 cathode](https://patentimages.storage.googleapis.com/pages/CN113264560A-0001.png)
+    ![FIG. 2 SEM photograph](https://patentimages.storage.googleapis.com/pages/CN113264560A-0002.png)
+    <img alt="FIG. 3 manufacturing process schematic" src="https://patentimages.storage.googleapis.com/pages/CN113264560A-0003.jpg">
+  `;
+
+  assert.deepEqual(
+    extractPatentFigureImageLinks(page, { mode: 'flow' }).map(image => ({
+      url: image.url,
+      process_diagram_candidate: image.process_diagram_candidate,
+    })),
+    [
+      {
+        url: 'https://patentimages.storage.googleapis.com/pages/CN113264560A-0001.png',
+        process_diagram_candidate: true,
+      },
+      {
+        url: 'https://patentimages.storage.googleapis.com/pages/CN113264560A-0003.jpg',
+        process_diagram_candidate: true,
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    extractPatentFigureImageLinks(page, { mode: 'all' }).map(image => image.url),
+    [
+      'https://patentimages.storage.googleapis.com/pages/CN113264560A-0001.png',
+      'https://patentimages.storage.googleapis.com/pages/CN113264560A-0002.png',
+      'https://patentimages.storage.googleapis.com/pages/CN113264560A-0003.jpg',
+    ],
+  );
+});
+
+test('extractPatentFigureImageLinks pairs Jina image labels with separated figure captions', () => {
+  const page = `
+    *   ![Image 1](https://patentimages.storage.googleapis.com/pages/CN114455646A-0001.png)
+    *   ![Image 2](https://patentimages.storage.googleapis.com/pages/CN114455646A-0002.png)
+
+    Description of drawings
+
+    FIG. 1 is a process flow chart for manufacturing NCM811 cathode precursor.
+    FIG. 2 is an SEM image of the prepared NCM811 cathode material.
+  `;
+
+  assert.deepEqual(
+    extractPatentFigureImageLinks(page, { mode: 'flow' }).map(image => image.url),
+    ['https://patentimages.storage.googleapis.com/pages/CN114455646A-0001.png'],
+  );
+});
+
+test('extractPatentFigureImageLinks prefers full-size inline figures over Jina thumbnails', () => {
+  const page = `
+    *   ![Image 1](https://patentimages.storage.googleapis.com/93/09/60/05177a3b83f468/HDA0003478148940000011.png)
+
+    [![Image 8: Figure 202210060895](https://patentimages.storage.googleapis.com/7b/f5/f2/e5655479ecd690/202210060895.png)](https://patentimages.storage.googleapis.com/7b/f5/f2/e5655479ecd690/202210060895.png)
+
+    Drawings
+
+    FIG. 1 is a schematic diagram showing the relation between the double-dispersion stacking mode and the particle size of the NCM811 cathode material.
+  `;
+
+  assert.deepEqual(
+    extractPatentFigureImageLinks(page, { mode: 'flow' }).map(image => image.url),
+    ['https://patentimages.storage.googleapis.com/7b/f5/f2/e5655479ecd690/202210060895.png'],
+  );
 });

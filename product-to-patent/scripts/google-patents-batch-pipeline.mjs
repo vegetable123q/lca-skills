@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import {
+  downloadPatentFigureImages,
+  extractPatentFigureImageLinks,
+} from './google-patents-download-fulltext.mjs';
 
 const googlePatentsOrigin = 'https://patents.google.com';
 
@@ -144,7 +148,7 @@ async function downloadViaJinaNative(pubNum) {
 }
 
 async function run(options) {
-  const { outDir, targetCount, downloadDelay, maxDepth, skipExisting } = options;
+  const { outDir, targetCount, downloadDelay, maxDepth, skipExisting, downloadImages, imageMode } = options;
   fs.mkdirSync(outDir, { recursive: true });
 
   const seedPaths = [
@@ -158,6 +162,7 @@ async function run(options) {
 
   console.log(`\n=== NCM811 Batch Pipeline ===`);
   console.log(`Seeds: ${seeds.length} | Target: ${targetCount} | Max depth: ${maxDepth} | Delay: ${downloadDelay}s`);
+  console.log(`Images: ${downloadImages ? imageMode : 'no'}`);
   console.log(`Output: ${outDir}/\n`);
 
   const visited = new Set(seeds);
@@ -177,6 +182,7 @@ async function run(options) {
     let downloadSource = '';
     let meta = {};
     let citations = { cited: [], citedBy: [], similar: [] };
+    let figureImages = [];
 
     if (skipExisting && fs.existsSync(txtFile) && fs.statSync(txtFile).size > 500) {
       content = fs.readFileSync(txtFile, 'utf8');
@@ -185,6 +191,10 @@ async function run(options) {
       status = 'skipped';
       downloadSource = 'existing';
       skipped++;
+      if (downloadImages) {
+        const figureImageLinks = extractPatentFigureImageLinks(content, { mode: imageMode });
+        figureImages = await downloadPatentFigureImages(pubNum, figureImageLinks, outDir);
+      }
     } else {
       let result = await downloadViaJina(pubNum);
 
@@ -208,6 +218,10 @@ async function run(options) {
         status = 'ok';
         downloadSource = 'jina';
         ok++;
+        if (downloadImages) {
+          const figureImageLinks = extractPatentFigureImageLinks(content, { mode: imageMode });
+          figureImages = await downloadPatentFigureImages(pubNum, figureImageLinks, outDir);
+        }
       }
     }
 
@@ -224,6 +238,8 @@ async function run(options) {
       cited_count: citations.cited.length,
       cited_by_count: citations.citedBy.length,
       similar_count: citations.similar.length,
+      figure_image_count: figureImages.filter(image => image.status === 'ok').length,
+      figure_images: figureImages,
     });
 
     if (status !== 'failed' && depth < maxDepth) {
@@ -261,6 +277,8 @@ async function run(options) {
       max_depth: maxDepth,
       target_count: targetCount,
       download_delay: downloadDelay,
+      download_images: downloadImages,
+      image_mode: imageMode,
     },
     totals: {
       total: results.length,
@@ -285,6 +303,8 @@ function parseArgs(rawArgs) {
     downloadDelay: 6,
     maxDepth: 2,
     skipExisting: true,
+    downloadImages: false,
+    imageMode: 'flow',
   };
 
   for (let i = 0; i < rawArgs.length; i++) {
@@ -298,8 +318,12 @@ function parseArgs(rawArgs) {
       case '--target-count':
       case '--download-delay':
       case '--max-depth':
+      case '--image-mode':
         if (i + 1 >= rawArgs.length) throw new Error(`${arg} requires a value`);
         options[arg.slice(2).replace(/-([a-z])/gu, (_, c) => c.toUpperCase())] = rawArgs[++i];
+        break;
+      case '--download-images':
+        options.downloadImages = true;
         break;
       case '--no-skip-existing':
         options.skipExisting = false;
@@ -312,6 +336,9 @@ function parseArgs(rawArgs) {
   options.targetCount = Number.parseInt(options.targetCount, 10);
   options.downloadDelay = Number.parseInt(options.downloadDelay, 10);
   options.maxDepth = Number.parseInt(options.maxDepth, 10);
+  if (!['flow', 'all'].includes(options.imageMode)) {
+    throw new Error('--image-mode must be "flow" or "all"');
+  }
 
   return options;
 }
@@ -337,6 +364,8 @@ Options:
   --target-count <n>       Target number of patents (default: 800)
   --download-delay <s>     Seconds between downloads (default: 6)
   --max-depth <n>          Citation chain depth: 0=seeds only, 1=direct, 2=indirect (default: 2)
+  --download-images        Download patent figure images discovered in downloaded text
+  --image-mode <mode>      Image selection mode: flow or all (default: flow)
   --no-skip-existing       Re-download already-present .txt files
   -h, --help               Show this help
 `.trim());

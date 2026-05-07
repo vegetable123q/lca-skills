@@ -40,6 +40,8 @@ node product-to-patent/scripts/google-patents-download-fulltext.mjs \
   --metadata-file output/product-to-patent/ncm811-cathode/q1/google-patents-metadata.json \
   --out-dir output/raw \
   --delay 25 \
+  --download-images \
+  --image-mode flow \
   --skip-existing
 ```
 
@@ -52,12 +54,13 @@ node product-to-patent/scripts/google-patents-download-fulltext.mjs \
   --delay 25
 ```
 
-The downloader tries four text strategies per publication (Jina Reader en, Jina Reader native language, direct fetch, Jina XHR), then PDF download. It adds configurable delays between requests to avoid rate limiting. Output goes to one `.md`/`.html` file per patent plus `download-summary.json`.
+The downloader tries four text strategies per publication (Jina Reader en, Jina Reader native language, direct fetch, Jina XHR), then PDF download. With `--download-images --image-mode flow`, it also extracts Google PatentImages figure URLs with process-flow, preparation-process, manufacturing-process, schematic, or Chinese flow-chart signals and stores them under `<out-dir>/<PUBNUM>-images/`; when Jina exposes both a 120 px thumbnail and a later full-size inline figure, the downloader prefers the full-size figure. Use `--image-mode all` only when manual review needs every patent drawing. It adds configurable delays between requests to avoid rate limiting. Output goes to one `.md`/`.html` file per patent plus `download-summary.json`.
 
 5. Review the downloaded full-text files in `output/raw/` and `download-summary.json`.
 6. Group candidates by patent family signals before ranking them. Treat family members as one source family unless they add materially different disclosure.
 7. Pick patents that disclose process recipe data: masses, molar ratios, precursor concentrations, pH, drying/calcination temperatures, atmosphere, residence times, yields, and product composition.
-8. Write a reviewed candidate file using `assets/reviewed-candidates.template.json`, then pass the selected source patent into `$patent-to-lifecyclemodel`.
+8. For NCM811 cathode manufacturing patents, keep process-flow candidate figures when available; they can reveal unit-operation order, recycle loops, or coating/calcination routing that text extraction may flatten. Do not treat generic SEM photos, battery structure drawings, or decorative page images as lifecyclemodel-ready process evidence unless captions or surrounding text connect them to the manufacturing route.
+9. Write a reviewed candidate file using `assets/reviewed-candidates.template.json`, then pass the selected source patent into `$patent-to-lifecyclemodel`.
 
 ## NCM811 Batch Pipeline
 
@@ -67,12 +70,13 @@ For large-scale NCM811 collection (800+ patents), use the batch pipeline:
 node product-to-patent/scripts/google-patents-batch-pipeline.mjs \
   --out-dir output/raw \
   --target-count 800 \
-  --max-pages 10 \
+  --max-depth 2 \
   --download-delay 6 \
-  --skip-existing
+  --download-images \
+  --image-mode flow
 ```
 
-The pipeline runs 20 NCM811 search queries across multiple pages, deduplicates, then downloads full text for each unique publication via Jina Reader. Output is one `.txt` file per patent (matching `data/` directory format) plus `download-summary.json` with per-patent metadata (title, assignee, dates, CPC codes, abstract).
+The pipeline runs NCM811 seed and citation-chain discovery, deduplicates, then downloads full text for each unique publication via Jina Reader. When image download is enabled, process-flow candidate figures are saved under `<out-dir>/<PUBNUM>-images/` and indexed in `download-summary.json`. Output is one `.txt` file per patent (matching `data/` directory format) plus `download-summary.json` with per-patent metadata (title, assignee, dates, CPC codes, abstract).
 
 To run discovery only (no download):
 
