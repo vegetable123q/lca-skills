@@ -78,14 +78,14 @@ This repo does not own:
 
 Route those tasks to:
 
-- `tiangong-lca-cli` for new native `tiangong <noun> <verb>` commands
+- `tiangong-lca-cli` for new native `tiangong-lca <noun> <verb>` commands
 - the owning product/runtime repo for business logic or API changes
 - `lca-workspace` for root integration after merge
 
 ## Runtime Facts
 
 - Repo-local documentation governance is enforced through `.docpact/config.yaml` and `.github/workflows/ai-doc-lint.yml`.
-- This repo is distribution-oriented; each skill should stay a thin wrapper over the unified `tiangong` CLI
+- This repo is distribution-oriented; each skill should stay a thin wrapper over the unified `tiangong-lca` CLI
 - If a capability is missing, add it to `tiangong-lca-cli` first, then update the skill wrapper here
 - The canonical local validation command is `node scripts/validate-skills.mjs`
 - You may pass one or more skill paths to validate only the touched skills

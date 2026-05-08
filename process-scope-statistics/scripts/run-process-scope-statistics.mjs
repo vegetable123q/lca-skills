@@ -26,7 +26,7 @@ Wrapper options:
   -h, --help
 
 Delegates to:
-  tiangong process scope-statistics
+  tiangong-lca process scope-statistics
 
 Runtime:
   default                  ${publishedCliCommand}
