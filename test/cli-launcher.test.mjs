@@ -43,24 +43,24 @@ test('buildTiangongInvocation uses npm exec for the published CLI contract', () 
     '--yes',
     '--package=@tiangong-lca/cli@latest',
     '--',
-    'tiangong',
+    'tiangong-lca',
     'review',
     'process',
     '--help',
   ]);
-  assert.match(publishedCliCommand, /npm exec --yes --package=@tiangong-lca\/cli@latest -- tiangong/u);
+  assert.match(publishedCliCommand, /npm exec --yes --package=@tiangong-lca\/cli@latest -- tiangong-lca/u);
 });
 
 test('buildTiangongInvocation prefers an auto-discovered local CLI checkout', () => {
   const invocation = buildTiangongInvocation(['review', 'process', '--help'], {
     repoRoot: '/workspace/tiangong-lca-skills',
     pathExists: (candidate) =>
-      candidate === '/workspace/tiangong-cli' || candidate === '/workspace/tiangong-cli/bin/tiangong.js',
+      candidate === '/workspace/tiangong-cli' || candidate === '/workspace/tiangong-cli/bin/tiangong-lca.js',
   });
 
   assert.equal(invocation.mode, 'local');
   assert.equal(invocation.command, process.execPath);
-  assert.deepEqual(invocation.args, ['/workspace/tiangong-cli/bin/tiangong.js', 'review', 'process', '--help']);
+  assert.deepEqual(invocation.args, ['/workspace/tiangong-cli/bin/tiangong-lca.js', 'review', 'process', '--help']);
 });
 
 test('runTiangongCommand emits a clear diagnostic when the published help path returns no output', () => {
