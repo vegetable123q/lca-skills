@@ -87,6 +87,24 @@ function normalizeText(value) {
     .toLowerCase();
 }
 
+function normalizeChemicalText(value) {
+  return String(value || '')
+    .replace(/\((?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\)/giu, ' ')
+    .replace(/（(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)）/giu, ' ')
+    .replace(/\b(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\b/giu, ' ');
+}
+
+function normalizeCandidateText(value) {
+  return normalizeText(
+    normalizeChemicalText(value)
+      .replace(
+        /\b(?:mono|di|tri|tetra|penta|hexa|hepta|octa|nona|deca)hydrate\b/giu,
+        ' ',
+      )
+      .replace(/^[一二三四五六七八九十]水/u, ' '),
+  );
+}
+
 function compareVersions(left, right) {
   const leftParts = String(left || '').split('.').map((part) => Number.parseInt(part, 10) || 0);
   const rightParts = String(right || '').split('.').map((part) => Number.parseInt(part, 10) || 0);
@@ -128,7 +146,7 @@ function propertyGroupFromDataset(dataset) {
     ? property.referenceToFlowPropertyDataSet
     : {};
   const id = text(ref['@refObjectId']);
-  const description = normalizeText(ref['common:shortDescription']);
+  const description = normalizeText(text(ref['common:shortDescription']));
   if (id === MASS_PROPERTY_ID || description.includes('mass')) return 'mass';
   if (id === VOLUME_PROPERTY_ID || description.includes('volume')) return 'volume';
   if (id === ITEM_PROPERTY_ID || description.includes('number of items')) return 'item';
@@ -154,6 +172,80 @@ function amountFactor(sourceUnit, targetUnit) {
   const target = unitInfo(targetUnit);
   if (!source.group || !target.group || source.group !== target.group) return 1;
   return source.factor / target.factor;
+}
+
+function buildFlowSearchCandidates(flowNames) {
+  const candidates = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    const normalizedName = candidate.normalizedName || normalizeText(candidate.name);
+    if (!normalizedName) return;
+    const key = `${normalizedName}\u0000${candidate.reason}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({
+      name: candidate.name,
+      normalizedName,
+      reason: candidate.reason || 'exact_name_match',
+      autoReuse: candidate.autoReuse === true,
+    });
+  };
+
+  for (const name of flowNames) {
+    add({ name, reason: 'exact_name_match', autoReuse: true });
+    const normalizedCandidate = normalizeCandidateText(name);
+    const exactNormalized = normalizeText(name);
+    if (normalizedCandidate && normalizedCandidate !== exactNormalized) {
+      add({
+        name,
+        normalizedName: normalizedCandidate,
+        reason: 'normalized_name_candidate',
+        autoReuse: false,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function reasonRank(reason) {
+  if (reason === 'exact_name_match') return 0;
+  if (reason === 'normalized_name_candidate') return 1;
+  return 2;
+}
+
+function compareCandidateMatches(left, right) {
+  const reasonDelta = reasonRank(left.candidate.reason) - reasonRank(right.candidate.reason);
+  if (reasonDelta !== 0) return reasonDelta;
+
+  const leftState = Number(left.record.stateCode ?? -1);
+  const rightState = Number(right.record.stateCode ?? -1);
+  if (leftState !== rightState) return rightState - leftState;
+
+  const versionDelta = compareVersions(right.record.version, left.record.version);
+  if (versionDelta !== 0) return versionDelta;
+
+  const leftModified = Date.parse(left.record.modifiedAt || '') || 0;
+  const rightModified = Date.parse(right.record.modifiedAt || '') || 0;
+  if (leftModified !== rightModified) return rightModified - leftModified;
+
+  return left.record.id.localeCompare(right.record.id);
+}
+
+function buildReuseDecision(flowKey, unit, target, matchedCandidate, candidateCount, reason) {
+  const factor = amountFactor(unit, target.unit);
+  return {
+    flow_key: flowKey,
+    decision: 'reuse_existing',
+    reason,
+    id: target.id,
+    version: target.version,
+    name: target.name,
+    unit: target.unit,
+    amount_factor: factor,
+    source_unit: unit,
+    candidate_count: candidateCount,
+  };
 }
 
 function explicitExistingFlowRef(flow) {
@@ -185,24 +277,35 @@ function extractFlowRecord(row) {
   return {
     id,
     version,
+    stateCode: typeof row?.state_code === 'number' ? row.state_code : null,
+    modifiedAt: text(row?.modified_at) || null,
     name,
     names,
     normalizedName: normalizeText(name),
-    normalizedNames: uniqueStrings(names.map((candidate) => normalizeText(candidate))),
+    normalizedNames: uniqueStrings(
+      names.flatMap((candidate) => [normalizeText(candidate), normalizeCandidateText(candidate)]),
+    ),
     propertyGroup,
     unit: referenceUnitForGroup(propertyGroup, 'kg'),
   };
 }
 
-function collapseLatestById(candidates) {
+function collapseLatestMatchesById(matches) {
   const byId = new Map();
-  for (const candidate of candidates) {
-    const current = byId.get(candidate.id);
-    if (!current || compareVersions(candidate.version, current.version) > 0) {
-      byId.set(candidate.id, candidate);
+  for (const match of matches) {
+    const current = byId.get(match.record.id);
+    if (
+      !current ||
+      compareVersions(match.record.version, current.record.version) > 0 ||
+      (
+        compareVersions(match.record.version, current.record.version) === 0 &&
+        reasonRank(match.candidate.reason) < reasonRank(current.candidate.reason)
+      )
+    ) {
+      byId.set(match.record.id, match);
     }
   }
-  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
+  return [...byId.values()].sort((left, right) => left.record.id.localeCompare(right.record.id));
 }
 
 function resolveOneFlow(flowKey, flow, generatedId, scopeRecords) {
@@ -234,59 +337,65 @@ function resolveOneFlow(flowKey, flow, generatedId, scopeRecords) {
     ...listify(flow?.aliases),
     ...listify(flow?.match_names),
   ]);
-  const normalizedFlowNames = uniqueStrings(flowNames.map((candidate) => normalizeText(candidate)));
-  const exact = scopeRecords.filter((record) =>
-    (record.normalizedNames || [record.normalizedName]).some((candidate) =>
-      normalizedFlowNames.includes(candidate),
-    ),
-  );
-  const compatible = exact.filter((record) => {
+  const flowSearchCandidates = buildFlowSearchCandidates(flowNames);
+  const matches = [];
+  for (const record of scopeRecords) {
+    for (const recordName of record.normalizedNames || [record.normalizedName]) {
+      for (const candidate of flowSearchCandidates) {
+        if (recordName === candidate.normalizedName) {
+          matches.push({ record, candidate });
+        }
+      }
+    }
+  }
+  const compatible = matches.filter(({ record }) => {
     if (!sourceUnit.group || !record.propertyGroup) return true;
     return sourceUnit.group === record.propertyGroup;
   });
-  const candidates = compatible.length > 0 ? compatible : exact;
-  const latestById = collapseLatestById(candidates);
+  const candidates = compatible.length > 0 ? compatible : matches;
+  const latestById = collapseLatestMatchesById(candidates).sort(compareCandidateMatches);
+  const autoReusableLatest = latestById.filter((match) => match.candidate.autoReuse);
   const stableExisting = generatedId
-    ? latestById.find((candidate) => candidate.id === generatedId)
+    ? autoReusableLatest.find((match) => match.record.id === generatedId)
     : null;
 
   if (stableExisting) {
-    const factor = amountFactor(unit, stableExisting.unit);
-    return {
-      flow_key: flowKey,
-      decision: 'reuse_existing',
-      reason: 'stable_uuid_exact_name_match',
-      id: stableExisting.id,
-      version: stableExisting.version,
-      name: stableExisting.name,
-      unit: stableExisting.unit,
-      amount_factor: factor,
-      source_unit: unit,
-      candidate_count: candidates.length,
-    };
+    return buildReuseDecision(
+      flowKey,
+      unit,
+      stableExisting.record,
+      stableExisting.candidate,
+      candidates.length,
+      'stable_uuid_exact_name_match',
+    );
   }
 
-  if (latestById.length === 1) {
-    const target = latestById[0];
-    const factor = amountFactor(unit, target.unit);
-    return {
-      flow_key: flowKey,
-      decision: 'reuse_existing',
-      reason: 'unique_exact_name_match',
-      id: target.id,
-      version: target.version,
-      name: target.name,
-      unit: target.unit,
-      amount_factor: factor,
-      source_unit: unit,
-      candidate_count: candidates.length,
-    };
+  if (autoReusableLatest.length === 1) {
+    const target = autoReusableLatest[0].record;
+    const matchedCandidate = autoReusableLatest[0].candidate;
+    return buildReuseDecision(
+      flowKey,
+      unit,
+      target,
+      matchedCandidate,
+      latestById.length,
+      'unique_exact_name_match',
+    );
   }
 
+  const hasExactCandidate = autoReusableLatest.length > 0;
+  const hasSuggestionCandidate = latestById.some((match) => !match.candidate.autoReuse);
   return {
     flow_key: flowKey,
     decision: 'create_new',
-    reason: latestById.length > 1 ? 'ambiguous_exact_name_match' : 'no_exact_name_match',
+    reason:
+      latestById.length > 1
+        ? hasExactCandidate
+          ? 'ambiguous_exact_name_match'
+          : 'ambiguous_candidate_name_match'
+        : hasSuggestionCandidate
+          ? 'candidate_name_match'
+          : 'no_exact_name_match',
     id: generatedId,
     version: '01.00.000',
     name,
@@ -294,11 +403,12 @@ function resolveOneFlow(flowKey, flow, generatedId, scopeRecords) {
     amount_factor: 1,
     source_unit: unit,
     candidate_count: latestById.length,
-    candidates: latestById.slice(0, 20).map((candidate) => ({
-      id: candidate.id,
-      version: candidate.version,
-      name: candidate.name,
-      unit: candidate.unit,
+    candidates: latestById.slice(0, 5).map(({ record, candidate }) => ({
+      id: record.id,
+      version: record.version,
+      name: record.name,
+      unit: record.unit,
+      match_reason: candidate.reason,
     })),
   };
 }
@@ -325,7 +435,7 @@ export function buildFlowResolution(plan, uuids, scopeRows = []) {
       summary.reuse_existing += 1;
     } else {
       summary.create_new += 1;
-      if (decision.reason === 'ambiguous_exact_name_match') summary.ambiguous += 1;
+      if (decision.reason.startsWith('ambiguous_')) summary.ambiguous += 1;
       if (decision.reason === 'no_exact_name_match') summary.no_match += 1;
       if (decision.candidate_count > 0) {
         review.push({
@@ -365,6 +475,8 @@ export function loadFlowScopeRows(filePath) {
     return parsed.rows.map((row) => ({
       id: row.id,
       version: row.version,
+      state_code: row.state_code,
+      modified_at: row.modified_at,
       json_ordered: row.flow ?? row.json_ordered ?? row.json,
     }));
   }
@@ -391,7 +503,9 @@ export function applyFlowResolutionToExchange(exchange, direction, plan, resolut
     commentBits.push(`reused database flow ${flowId}@${version}`);
   }
   if (resolved.amount_factor && Number(resolved.amount_factor) !== 1) {
-    commentBits.push(`converted from ${resolved.source_unit || flow.unit} to ${unit}`);
+    commentBits.push(
+      resolved.conversion_note || `converted from ${resolved.source_unit || flow.unit} to ${unit}`,
+    );
   }
 
   return {

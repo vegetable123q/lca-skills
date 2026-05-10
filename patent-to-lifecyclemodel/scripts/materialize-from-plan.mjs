@@ -33,7 +33,7 @@ import {
   loadFlowScopeRows,
   writeFlowResolution,
 } from './flow-resolution.mjs';
-import { ensureRemoteFlowScopeFile } from './remote-flow-scope.mjs';
+import { requireRemoteFlowScopeFile } from './remote-flow-scope.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
 import { buildPlanUuids, readExistingUuids } from './uuid-plan.mjs';
 
@@ -125,7 +125,7 @@ writeJson(uuidsFile, uuids);
 let effectiveFlowScopeFile = flowScopeFile;
 if (!noRemoteFlowScope) {
   try {
-    effectiveFlowScopeFile = ensureRemoteFlowScopeFile({
+    effectiveFlowScopeFile = requireRemoteFlowScopeFile({
       base,
       explicitFlowScopeFile: flowScopeFile,
       repoRoot: projectRoot,

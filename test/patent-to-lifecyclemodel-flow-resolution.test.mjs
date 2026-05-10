@@ -54,6 +54,14 @@ function multilingualFlowRow({ id, version, names, property = 'Mass' }) {
   return row;
 }
 
+function flowRowWithArrayPropertyDescription({ id, version, name, property = 'Net calorific value' }) {
+  const row = flowRow({ id, version, name, property });
+  row.json_ordered.flowDataSet.flowProperties.flowProperty.referenceToFlowPropertyDataSet[
+    'common:shortDescription'
+  ] = [{ '@xml:lang': 'en', '#text': property }];
+  return row;
+}
+
 test('buildFlowResolution reuses unique existing DB flow latest version and leaves patent-specific flow new', () => {
   const plan = {
     source: { id: 'CN123' },
@@ -78,25 +86,51 @@ test('buildFlowResolution reuses unique existing DB flow latest version and leav
   assert.equal(resolution.summary.create_new, 1);
 });
 
-test('buildFlowResolution does not auto-pick ambiguous distinct DB flows', () => {
+test('buildFlowResolution does not auto-pick ambiguous patent-specific DB flows', () => {
   const plan = {
     source: { id: 'CN123' },
     flows: {
-      electricity: { name_en: 'Electricity, low voltage', unit: 'kWh' },
+      product: { name_en: 'NCM811 cathode material', unit: 'kg' },
     },
   };
-  const uuids = { flows: { electricity: 'new-electricity' } };
+  const uuids = { flows: { product: 'new-product' } };
   const scopeRows = [
-    flowRow({ id: 'db-electricity-cn', version: '01.01.000', name: 'Electricity, low voltage' }),
-    flowRow({ id: 'db-electricity-glo', version: '01.01.000', name: 'Electricity, low voltage' }),
+    flowRow({ id: 'db-product-a', version: '01.01.000', name: 'NCM811 cathode material' }),
+    flowRow({ id: 'db-product-b', version: '01.01.000', name: 'NCM811 cathode material' }),
   ];
 
   const resolution = buildFlowResolution(plan, uuids, scopeRows);
 
-  assert.equal(resolution.flows.electricity.decision, 'create_new');
-  assert.equal(resolution.flows.electricity.reason, 'ambiguous_exact_name_match');
+  assert.equal(resolution.flows.product.decision, 'create_new');
+  assert.equal(resolution.flows.product.reason, 'ambiguous_exact_name_match');
   assert.equal(resolution.review.length, 1);
   assert.equal(resolution.review[0].candidate_count, 2);
+});
+
+test('buildFlowResolution lists ambiguous common flow candidates instead of auto-picking', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      oxygen: { name_en: 'Oxygen', unit: 'kg' },
+    },
+  };
+  const uuids = { flows: { oxygen: 'new-oxygen' } };
+  const scopeRows = [
+    flowRow({ id: 'db-oxygen-old', version: '01.00.000', name: 'oxygen' }),
+    flowRow({ id: 'db-oxygen-new', version: '01.01.000', name: 'Oxygen' }),
+  ];
+
+  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+
+  assert.equal(resolution.flows.oxygen.decision, 'create_new');
+  assert.equal(resolution.flows.oxygen.reason, 'ambiguous_exact_name_match');
+  assert.equal(resolution.flows.oxygen.id, 'new-oxygen');
+  assert.equal(resolution.flows.oxygen.candidate_count, 2);
+  assert.equal(resolution.review.length, 1);
+  assert.deepEqual(
+    resolution.review[0].candidates.map((candidate) => candidate.id),
+    ['db-oxygen-new', 'db-oxygen-old'],
+  );
 });
 
 test('buildFlowResolution reuses stable generated UUID when it already exists remotely', () => {
@@ -198,6 +232,74 @@ test('buildFlowResolution matches plan aliases and multilingual DB names', () =>
   assert.equal(resolution.flows.potassium_chloride.id, 'db-kcl');
   assert.equal(resolution.flows.electricity.decision, 'reuse_existing');
   assert.equal(resolution.flows.electricity.id, 'db-electricity');
+});
+
+test('buildFlowResolution reads array flow-property descriptions for energy units', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      electricity: {
+        name_en: 'Electricity, medium voltage',
+        unit: 'kWh',
+      },
+    },
+  };
+  const uuids = { flows: { electricity: 'new-electricity' } };
+  const scopeRows = [
+    flowRowWithArrayPropertyDescription({
+      id: 'db-electricity',
+      version: '01.01.000',
+      name: 'Electricity, medium voltage',
+    }),
+  ];
+
+  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+
+  assert.equal(resolution.flows.electricity.decision, 'reuse_existing');
+  assert.equal(resolution.flows.electricity.id, 'db-electricity');
+  assert.equal(resolution.flows.electricity.unit, 'kWh');
+});
+
+test('buildFlowResolution lists normalized hydrate candidates without auto-conversion', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      manganese_sulfate_tetrahydrate: {
+        name_en: 'Manganese sulfate tetrahydrate',
+        name_zh: '四水硫酸锰',
+        unit: 'kg',
+      },
+    },
+  };
+  const uuids = {
+    flows: {
+      manganese_sulfate_tetrahydrate: 'new-mnso4-4h2o',
+    },
+  };
+  const scopeRows = [
+    multilingualFlowRow({
+      id: 'db-manganese-sulfate',
+      version: '01.02.000',
+      names: ['硫酸锰(II)', 'Manganese(II) sulfate'],
+    }),
+  ];
+
+  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+
+  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.decision, 'create_new');
+  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.reason, 'candidate_name_match');
+  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.id, 'new-mnso4-4h2o');
+  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.amount_factor, 1);
+  assert.equal(resolution.review.length, 1);
+  assert.deepEqual(resolution.review[0].candidates, [
+    {
+      id: 'db-manganese-sulfate',
+      version: '01.02.000',
+      name: '硫酸锰(II)',
+      unit: 'kg',
+      match_reason: 'normalized_name_candidate',
+    },
+  ]);
 });
 
 test('applyFlowResolutionToExchange writes existing DB flow refs and unit conversions', () => {

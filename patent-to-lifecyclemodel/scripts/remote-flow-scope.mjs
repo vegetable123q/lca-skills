@@ -84,3 +84,15 @@ export function ensureRemoteFlowScopeFile(options) {
   fs.renameSync(tempOutPath, outPath);
   return outPath;
 }
+
+export function requireRemoteFlowScopeFile(options) {
+  const result = ensureRemoteFlowScopeFile(options);
+  if (result) return result;
+
+  throw new Error(
+    'remote flow scope is required for patent-to-lifecyclemodel materialization; ' +
+      'set TIANGONG_LCA_API_BASE_URL, TIANGONG_LCA_API_KEY, and ' +
+      'TIANGONG_LCA_SUPABASE_PUBLISHABLE_KEY, pass --flow-scope-file, or pass ' +
+      '--no-remote-flow-scope only for offline tests.',
+  );
+}

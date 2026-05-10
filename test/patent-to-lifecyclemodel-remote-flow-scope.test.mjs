@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   ensureRemoteFlowScopeFile,
   hasRemoteFlowScopeEnv,
+  requireRemoteFlowScopeFile,
 } from '../patent-to-lifecyclemodel/scripts/remote-flow-scope.mjs';
 
 const remoteEnv = {
@@ -31,6 +32,20 @@ test('ensureRemoteFlowScopeFile uses an explicit scope file without shelling out
   });
 
   assert.equal(result, explicitFile);
+});
+
+test('requireRemoteFlowScopeFile rejects silent offline materialization without scope', () => {
+  assert.throws(
+    () =>
+      requireRemoteFlowScopeFile({
+        base: '/workspace/output/CN123',
+        env: {},
+        spawnImpl: () => {
+          throw new Error('should not spawn');
+        },
+      }),
+    /remote flow scope is required/u,
+  );
 });
 
 test('ensureRemoteFlowScopeFile materializes remote flow list when env is available', () => {

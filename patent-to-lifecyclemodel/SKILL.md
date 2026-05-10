@@ -24,7 +24,7 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --publish-only --commit --json
 ```
 
-When Supabase read env is present, materialization first delegates to `tiangong flow list --state-code 0 --state-code 100 --all` and writes `output/<SOURCE>/flow-scope.json`; pass `--flow-scope-file` to use a reviewed frozen scope, or `--no-remote-flow-scope` only for offline tests.
+Materialization requires a database flow scope by default. With Supabase read env present, it delegates to `tiangong flow list --state-code 0 --state-code 100 --all` and writes `output/<SOURCE>/flow-scope.json`; pass `--flow-scope-file` to use a reviewed frozen scope. If neither is available, the run fails instead of silently creating all flows locally. Use `--no-remote-flow-scope` only for explicit offline tests.
 Stage 7 first publishes generated flow datasets through `tiangong flow publish-reviewed-data`, then writes `publish-request.json` and calls `tiangong publish run`; do not add remote-write logic inside this skill.
 Reruns preserve `uuids.json` when present; keep that file when correcting previously published data so remote rows can be overwritten with stable IDs.
 
@@ -34,7 +34,7 @@ Reruns preserve `uuids.json` when present; keep that file when correcting previo
 - Reuse the same `flow_key` for an upstream output and downstream input; this creates lifecyclemodel edges.
 - Resolve flows against remote database scope first. Raw materials, elementary flows, utilities, electricity, water, oxygen, fuels, waste, and common reagents must prefer existing database flows; patent-specific intermediates, coated/composite products, and final results may be generated when unresolved.
 - Use `name_en`, `name_zh`, and `aliases`/`match_names` to expose database-matchable names such as generic reagent names or grid electricity names; unique exact matches across those names are reused and only unresolved patent-specific flows are generated.
-- If database search returns multiple defensible candidates, add an audited `existing_flow_ref` to the flow instead of creating a duplicate.
+- If search returns multiple defensible candidates, or only normalized candidate matches such as hydrate-to-anhydrous name variants, inspect `flow-resolution.json.review` and add an audited `existing_flow_ref` plus any required `canonical_flow_key`/`conversion_factor` instead of creating a duplicate.
 - Use normal physical units such as `kg`, `L`, `mol`, `kWh`, and `m3`; reserve `item` for unavoidable black-box processes.
 - `Measured` means directly stated. `Calculated` means source-derived; add `calc_note`. `Estimated` means source missing; add `formula_ref` or `source_ref`.
 - Use patent masses, volumes, concentrations, ratios, yields, residence times, temperatures, and flow rates before estimating.
@@ -43,7 +43,7 @@ Reruns preserve `uuids.json` when present; keep that file when correcting previo
 - Default to `black_box: false`. Use `black_box: true` only when critical material, product, or operation data are still missing after measured/calculated/estimated modeling.
 - Never mark a whole patent route black-box because some exchanges are missing. Split the route and black-box only the specific step with the critical gap.
 - If black-box is unavoidable, every flow used by that process must have `unit: "item"`, every exchange amount must be `1`, and `comment` must name the missing critical data.
-- Declare hydrate/alias conversions with `canonical_flow_key` and `conversion_factor`.
+- Hydrate and valence name variants are only surfaced as candidates; the resolver does not hard-code reagent-specific chemistry or conversion factors. Declare audited conversions with `canonical_flow_key` and `conversion_factor`.
 - Keep coated, doped, and composite products as composites; do not collapse them into pure phases.
 
 ## Minimum Plan

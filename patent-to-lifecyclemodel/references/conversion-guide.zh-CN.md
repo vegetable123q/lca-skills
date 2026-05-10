@@ -211,7 +211,9 @@ per_batch_kg = factor_kg_per_kg * product_mass_kg
 
 ## 5. 水合物到无水物的 canonical flow
 
-专利常写水合盐，但数据库可能只有无水流。做法是在 `flows` 同时声明两者，并让水合物指向无水物：
+专利常写水合盐，但数据库可能只有无水流。`flow-resolution.json` 会把去掉水合物前缀、罗马价态等规范化名称后的候选写入 `review.candidates`，但不会自动判断是否可替代，也不会自动计算换算系数。
+
+AI 或人工审阅候选后，如果确认可以使用数据库中的无水流，在 `flows` 同时声明两者，并让水合物指向无水物：
 
 ```json
 "coso4_7h2o": {
