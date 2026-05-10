@@ -1,4 +1,4 @@
 interface:
   display_name: "TianGong LCA Remote Cleanup"
-  short_description: "Plan and verify CLI-backed remote dataset cleanup"
-  default_prompt: "Use $tiangong-lca-remote-cleanup to plan remote TianGong dataset cleanup, verify delete support, handle permission failures, and republish corrected lifecyclemodel/process/flow artifacts through the CLI."
+  short_description: "Run reusable CLI-backed remote dataset cleanup"
+  default_prompt: "Use $tiangong-lca-remote-cleanup to plan and run remote TianGong dataset cleanup with tiangong-lca admin cleanup-owned, verify deleted and residual lifecyclemodel/process/flow rows, handle permission or state-code failures, and republish corrected artifacts through the CLI when needed."

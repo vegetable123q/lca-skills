@@ -15,15 +15,44 @@ Use source IDs as an additional filter in reports, but do not delete by name alo
 
 Remote hard delete is valid only through an explicit supported CLI/runtime command. If the current CLI has no delete command, or RLS returns `permission denied`, record the blocker and move to replace-by-publish. Do not embed decoded API-key credentials, direct Supabase clients, or table-specific delete code in this repo.
 
+For current-user owned lifecyclemodel/process/flow cleanup, use the CLI-owned reusable path:
+
+```bash
+tiangong-lca admin cleanup-owned --out-dir <cleanup-dir> --json
+tiangong-lca admin cleanup-owned --out-dir <cleanup-dir> --commit --json
+```
+
+The command is expected to:
+
+- resolve the authenticated Supabase user and filter every table by that `user_id`
+- delete lifecyclemodels through the `delete_lifecycle_model_bundle` Edge Function
+- delete process and flow draft rows through `cmd_dataset_delete(p_table, p_id, p_version)`
+- continue after row-level server refusals and record residual rows in `cleanup-owned-report.json`
+
+Known server-side limits:
+
+- direct table `DELETE` or `PATCH` can return `permission denied for table ...`; do not convert that into an ad hoc script inside this repo
+- `cmd_dataset_delete` can return `Only draft datasets can be deleted` for rows such as `state_code=20`; report those residual IDs and require an admin/service-side command if they must be physically removed
+- lifecyclemodels can return `Lifecycle models must use bundle create and delete commands` when a generic dataset delete is used; reroute through `delete_lifecycle_model_bundle`
+
 Recommended report shape:
 
 ```json
 {
   "sources": ["CN..."],
   "requested": { "lifecyclemodels": 0, "processes": 0, "flows": 0, "sources": 0 },
-  "delete_supported": false,
-  "blocker": "CLI has no supported hard-delete command or remote returned permission denied",
-  "next_action": "republish corrected artifacts with stable IDs"
+  "deleted": { "lifecyclemodels": 0, "processes": 0, "flows": 0, "sources": 0 },
+  "remaining": { "lifecyclemodels": 0, "processes": 0, "flows": 0, "sources": 0 },
+  "residuals": [
+    {
+      "table": "flows",
+      "id": "...",
+      "version": "01.01.000",
+      "state_code": 20,
+      "message": "Only draft datasets can be deleted"
+    }
+  ],
+  "next_action": "republish corrected artifacts with stable IDs or request service-side deletion for residuals"
 }
 ```
 
@@ -83,7 +112,7 @@ Before commit:
 - `flow-resolution.json` shows reused database flows where possible
 - process exports contain names, exchanges, reference units, and real flow references
 - lifecyclemodel summary has distinct process count and edges
-- `tiangong flow scan-process-flow-refs` reports all exchanges as `exists_in_target`
+- `tiangong-lca flow scan-process-flow-refs` reports all exchanges as `exists_in_target`
 
 After commit:
 
