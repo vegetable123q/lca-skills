@@ -1,6 +1,29 @@
 {
   "run_label": "<SOURCE>-lifecyclemodel",
   "allow_remote_write": false,
+  "basic_info": {
+    "name": "<goal name or patent title>",
+    "functional_unit": { "amount": 1, "unit": "kg" },
+    "boundary": "cradle-to-gate",
+    "geography": "<plan.geography>",
+    "reference_year": "<plan.reference_year>",
+    "source": {
+      "source_type": "patent",
+      "source_id": "<patent publication number>",
+      "title": "<patent title>",
+      "assignee": "<patent owner / company / applicant>",
+      "inventor": "<inventor names, optional>",
+      "priority_date": "<YYYY-MM-DD, optional>",
+      "publication_date": "<YYYY-MM-DD, optional>",
+      "grant_date": "<YYYY-MM-DD, optional>",
+      "year": "<publication year, priority year, grant year, or reference year>",
+      "reference_year": "<plan.reference_year>",
+      "extra_metadata": {
+        "url": "<patent page URL, optional>",
+        "family_members": ["<family publication number, optional>"]
+      }
+    }
+  },
   "selection": {
     "mode": "graph_first_local_inference",
     "max_models": 1,

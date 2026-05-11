@@ -3,7 +3,12 @@
   "source": {
     "id": "<PATENT-ID or paper citation>",
     "title": "<short title>",
-    "assignee": "<owner / author (optional)>"
+    "assignee": "<patent owner / company / applicant>",
+    "inventor": "<inventor names (optional)>",
+    "priority_date": "<YYYY-MM-DD if available>",
+    "publication_date": "<YYYY-MM-DD if available>",
+    "grant_date": "<YYYY-MM-DD if available>",
+    "year": "<preferred patent year if different from publication year>"
   },
   "goal": {
     "name": "<reference-product name>",

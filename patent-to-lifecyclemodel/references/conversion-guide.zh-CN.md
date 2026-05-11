@@ -249,7 +249,7 @@ conversion_factor = MW(anhydrous) / MW(hydrate)
 5. 调用 `process-automated-builder auto-build` 建立每个 process 的 scaffold run。
 6. 直接从 plan 写出 `runs/<SOURCE>-combined/exports/processes/<PROC_UUID>_00.00.001.json`。
 7. 从第一个 scaffold run 复制 `cache/process_from_flow_state.json` 和 `manifests/*.json` 到 `runs/<SOURCE>-combined/`，满足 lifecyclemodel builder 的本地 run 形状要求。
-8. 写 `manifests/lifecyclemodel-manifest.json`，指向单一 source-specific combined run。
+8. 写 `manifests/lifecyclemodel-manifest.json`，指向单一 source-specific combined run，并在 `basic_info.source` 中预填专利来源信息（公司/assignee、priority/publication/grant 日期、year、reference_year 等）；未显式映射但仍有用的来源字段（如 URL、family members）保留在 `basic_info.source.extra_metadata`，便于后续 CLI manifest 和模型基础信息区分同类专利模型。
 
 ILCD 数据集中的关键映射：
 

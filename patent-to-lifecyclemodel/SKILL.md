@@ -50,7 +50,15 @@ Reruns preserve `uuids.json` when present; keep that file when correcting previo
 
 ```jsonc
 {
-  "source": { "id": "<PATENT-ID>", "title": "...", "assignee": "..." },
+  "source": {
+    "id": "<PATENT-ID>",
+    "title": "...",
+    "assignee": "<company / patent owner>",
+    "priority_date": "<YYYY-MM-DD if available>",
+    "publication_date": "<YYYY-MM-DD if available>",
+    "grant_date": "<YYYY-MM-DD if available>",
+    "year": "<preferred patent year if needed>"
+  },
   "goal": { "name": "...", "functional_unit": {"amount": 1, "unit": "kg"}, "boundary": "..." },
   "geography": "CN",
   "reference_year": "2019",
@@ -81,6 +89,8 @@ Reruns preserve `uuids.json` when present; keep that file when correcting previo
   }]
 }
 ```
+
+Preserve patent source metadata in `source` whenever it is available. Company/assignee and the best patent year are copied into `manifests/lifecyclemodel-manifest.json.basic_info.source`, and additional source metadata such as patent URLs or family members is retained under `basic_info.source.extra_metadata`, so the downstream lifecyclemodel builder and publish manifests can distinguish otherwise similar patent-derived models.
 
 ## Verify
 

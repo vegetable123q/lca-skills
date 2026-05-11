@@ -11,7 +11,7 @@ Every stage shells out to an existing skill's published script.
 ### Stage A — Parse source (once)
 
 Read the source document ONCE and produce `output/<SOURCE>/plan.json` from `assets/plan.template.json`. Capture:
-- source metadata (id, title, assignee)
+- source metadata (id, title, assignee/company, inventor when available, priority/publication/grant dates, best patent year, and extra patent metadata such as URL or family members)
 - goal (functional unit, boundary)
 - every distinct flow that appears as an input, output, or intermediate
 - one entry in `processes[]` per unit operation, with `inputs`, `outputs`, `reference_output_flow`, `classification`, `technology`, `comment`, `step_id`
@@ -54,7 +54,7 @@ What it runs:
    - `runs/<NN>-<proc_key>/` via `process-automated-builder auto-build`
    - `runs/<SOURCE>-combined/exports/processes/<proc_uuid>_<ver>.json` per process (ILCD)
    - `runs/<SOURCE>-combined/{cache,manifests}/*` copied from the first scaffold run
-   - `manifests/lifecyclemodel-manifest.json`
+   - `manifests/lifecyclemodel-manifest.json`, including `basic_info.source` prefilled from patent metadata and `basic_info.source.extra_metadata` for additional source fields so downstream CLI manifests can distinguish company/year/source variants
 3. `lifecyclemodel-automated-builder build` → `lifecyclemodel-run/…/tidas_bundle/lifecyclemodels/<model_uuid>_<ver>.json`
 4. Driver reads Stage 3 output + normalized `plan.json` + `uuids.json` → writes `orchestrator-request.json`
 5. `lifecyclemodel-recursive-orchestrator` plan → execute → publish → `orchestrator-run/publish-summary.json`

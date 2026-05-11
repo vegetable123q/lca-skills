@@ -35,6 +35,7 @@ import {
 } from './flow-resolution.mjs';
 import { requireRemoteFlowScopeFile } from './remote-flow-scope.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
+import { buildPatentLifecyclemodelManifest } from './patent-metadata.mjs';
 import { buildPlanUuids, readExistingUuids } from './uuid-plan.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -382,13 +383,10 @@ function buildIlcd(proc) {
 });
 
 // ---------- 5. Emit lifecyclemodel manifest ----------
-writeJson(path.join(base, 'manifests', 'lifecyclemodel-manifest.json'), {
-  run_label: `${plan.source?.id || 'source'}-lifecyclemodel`,
-  allow_remote_write: false,
-  selection: { mode: 'graph_first_local_inference', max_models: 1, max_processes_per_model: 12 },
-  output: { write_local_models: true, emit_validation_report: true },
-  local_runs: [combinedDir],
-});
+writeJson(
+  path.join(base, 'manifests', 'lifecyclemodel-manifest.json'),
+  buildPatentLifecyclemodelManifest(plan, combinedDir),
+);
 
 const summary = {
   schema_version: 1,
