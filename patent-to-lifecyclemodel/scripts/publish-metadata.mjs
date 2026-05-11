@@ -90,6 +90,11 @@ function applyPatentBasicInfoToLifecyclemodelPayload(payload, manifest) {
   const dataSetInformation = info.dataSetInformation || {};
   info.dataSetInformation = dataSetInformation;
   let changed = appendUniqueGeneralComment(dataSetInformation, patentSourceComment(manifest));
+  const modelName = text(manifest.basic_info.name);
+  if (modelName) {
+    dataSetInformation.name = { baseName: [{ '@xml:lang': 'en', '#text': modelName }] };
+    changed = true;
+  }
   if (manifest.basic_info.reference_year && !text(dataSetInformation.referenceYear)) {
     dataSetInformation.referenceYear = String(manifest.basic_info.reference_year);
     changed = true;

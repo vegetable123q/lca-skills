@@ -120,6 +120,19 @@ const NEAREST_SINGLE_TOKEN_ALLOWED = new Set([
   'sulfate',
 ]);
 
+const CHEMICAL_FORM_TOKENS = new Set([
+  'carbonate',
+  'chloride',
+  'fluoride',
+  'hydroxide',
+  'molybdate',
+  'nitrate',
+  'ore',
+  'oxide',
+  'phosphate',
+  'sulfate',
+]);
+
 const METAL_ELEMENT_TOKENS = new Set([
   'aluminum',
   'antimony',
@@ -167,6 +180,16 @@ const UNSUITABLE_METAL_INPUT_TOKENS = new Set([
   'sludge',
   'spent',
   'waste',
+]);
+
+const GENERIC_SOURCE_FORM_TOKENS = new Set([
+  'composite',
+  'dopant',
+  'precursor',
+  'rich',
+  'shell',
+  'sol',
+  'source',
 ]);
 
 const INPUT_GAS_TOKENS = new Set([
@@ -387,6 +410,15 @@ function hasSpecificMetalElement(tokens) {
   return tokens.some((token) => METAL_ELEMENT_TOKENS.has(token));
 }
 
+function chemicalFormTokens(tokens) {
+  return tokens.filter((token) => CHEMICAL_FORM_TOKENS.has(token));
+}
+
+function hasSharedToken(leftTokens, rightTokens) {
+  const right = new Set(rightTokens);
+  return leftTokens.some((token) => right.has(token));
+}
+
 function isGenericMetalOnly(tokens) {
   return tokens.length === 1 && tokens[0] === 'metal';
 }
@@ -395,11 +427,36 @@ function nearestInputMatchScore(recordTokens, queryTokens) {
   if (recordTokens.length === 0 || queryTokens.size === 0) return null;
   const queryTokenList = [...queryTokens];
   const queryHasSpecificMetal = hasSpecificMetalElement(queryTokenList);
+  const queryHasGenericSourceForm = queryTokenList.some((token) =>
+    GENERIC_SOURCE_FORM_TOKENS.has(token),
+  );
+  const recordHasUnsuitableInputToken = recordTokens.some((token) =>
+    UNSUITABLE_METAL_INPUT_TOKENS.has(token),
+  );
   if (isGenericMetalOnly(recordTokens)) return null;
+  if (queryHasGenericSourceForm) {
+    return null;
+  }
+  if (queryHasSpecificMetal && recordHasUnsuitableInputToken) {
+    return null;
+  }
+  if (recordTokens.includes('ore') && !queryTokens.has('ore')) {
+    return null;
+  }
+
+  const sharedMetals = sharedMetalElementTokens(recordTokens, queryTokenList);
+  const queryForms = chemicalFormTokens(queryTokenList);
+  const recordForms = chemicalFormTokens(recordTokens);
+  if (queryForms.length > 0 && recordForms.length === 0) {
+    return null;
+  }
+  if (queryForms.length > 0 && recordForms.length > 0 && !hasSharedToken(queryForms, recordForms)) {
+    return null;
+  }
   if (
     queryHasSpecificMetal &&
-    queryTokens.has('metal') &&
-    recordTokens.some((token) => UNSUITABLE_METAL_INPUT_TOKENS.has(token))
+    sharedMetals.length === 0 &&
+    recordTokens.every((token) => CHEMICAL_FORM_TOKENS.has(token))
   ) {
     return null;
   }
@@ -422,7 +479,6 @@ function nearestInputMatchScore(recordTokens, queryTokens) {
     return 1 + recordTokens.length / queryTokens.size + metalBonus + formBonus;
   }
 
-  const sharedMetals = sharedMetalElementTokens(recordTokens, queryTokenList);
   if (queryHasSpecificMetal && sharedMetals.length > 0) {
     let score = 1.5 + sharedMetals.length;
     if (queryTokens.has('metal') && recordTokens.includes('metal')) score += 0.5;
@@ -546,9 +602,15 @@ function collapseLatestMatchesById(matches) {
 }
 
 function buildNearestInputMatches(flowNames, sourceUnit, scopeRecords) {
-  const queryTokenSets = flowNames
+  const allQueryTokenSets = flowNames
     .map((name) => new Set(uniqueTokens(name)))
     .filter((tokens) => tokens.size > 0);
+  const queryHasChemicalForm = allQueryTokenSets.some((tokens) =>
+    chemicalFormTokens([...tokens]).length > 0,
+  );
+  const queryTokenSets = queryHasChemicalForm
+    ? allQueryTokenSets.filter((tokens) => chemicalFormTokens([...tokens]).length > 0)
+    : allQueryTokenSets;
   const matches = [];
   for (const record of scopeRecords) {
     if (!isInputCompatibleFlowRecord(record, flowNames)) continue;

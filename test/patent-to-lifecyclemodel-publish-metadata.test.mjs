@@ -203,6 +203,7 @@ test('publish metadata carries patent source into lifecyclemodel basic info', ()
   const dataSetInformation =
     entry.json_ordered.lifeCycleModelDataSet.lifeCycleModelInformation.dataSetInformation;
   assert.equal(entry.basic_info.source.assignee, 'Example Battery Co');
+  assert.deepEqual(dataSetInformation.name.baseName, desc('NCM cathode model'));
   assert.equal(dataSetInformation.referenceYear, '2023');
   assert.equal(dataSetInformation.patentSource.source_id, 'CN123');
   assert.match(

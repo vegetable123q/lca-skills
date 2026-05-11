@@ -376,6 +376,53 @@ test('nearest matching uses compatible specialty reagent families and avoids emi
   assert.equal(emission.flows.lithium_molybdate.id, 'db-ammonium-orthomolybdate');
 });
 
+test('nearest matching rejects incompatible chemical forms and waste-like metal rows', () => {
+  const plan = planWith({
+    flows: {
+      aluminum_nitrate: { name_en: 'Aluminum nitrate', unit: 'kg' },
+      niobium_phosphate: {
+        name_en: 'Niobium phosphate dopant source',
+        aliases: ['niobium phosphorus dopant'],
+        unit: 'kg',
+      },
+      strontium_oxide: { name_en: 'Strontium oxide', unit: 'kg' },
+      manganese_rich_shell: { name_en: 'Manganese-rich precursor shell', unit: 'kg' },
+      composite_oxide_sol: { name_en: 'Aluminum titanium composite oxide sol', unit: 'kg' },
+      tungsten_source: { name_en: 'Tungsten source', unit: 'kg' },
+    },
+    inputs: [
+      { flow: 'aluminum_nitrate', amount: 1 },
+      { flow: 'niobium_phosphate', amount: 1 },
+      { flow: 'strontium_oxide', amount: 1 },
+      { flow: 'manganese_rich_shell', amount: 1 },
+      { flow: 'composite_oxide_sol', amount: 1 },
+      { flow: 'tungsten_source', amount: 1 },
+    ],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-alumina', version: '01.00.000', name: 'Aluminium oxide' }),
+    flowRow({ id: 'db-aluminium-primary', version: '01.00.000', name: 'Aluminium, primary, liquid' }),
+    flowRow({ id: 'db-niobium-oxide', version: '01.00.000', name: 'Niobium oxide' }),
+    flowRow({ id: 'db-calcium-oxide', version: '01.00.000', name: 'Calcium Oxide' }),
+    flowRow({ id: 'db-silicon-manganese', version: '01.00.000', name: 'Silicon manganese' }),
+    flowRow({
+      id: 'db-manganese-remediation',
+      version: '01.00.000',
+      name: 'manganese slag-based environmental remediation materials',
+    }),
+    flowRow({ id: 'db-tungsten-filament', version: '01.00.000', name: 'Tungsten filament' }),
+    flowRow({ id: 'db-tungsten-ore', version: '01.00.000', name: 'tungsten ore' }),
+  ]);
+
+  assert.equal(resolution.flows.aluminum_nitrate.decision, 'create_new');
+  assert.equal(resolution.flows.niobium_phosphate.decision, 'create_new');
+  assert.equal(resolution.flows.strontium_oxide.decision, 'create_new');
+  assert.equal(resolution.flows.manganese_rich_shell.decision, 'create_new');
+  assert.equal(resolution.flows.composite_oxide_sol.decision, 'create_new');
+  assert.equal(resolution.flows.tungsten_source.decision, 'create_new');
+});
+
 test('applyFlowResolutionToExchange writes existing DB flow refs and unit conversions', () => {
   const result = applyFlowResolutionToExchange(
     { flow: 'water', amount: 1000 },
