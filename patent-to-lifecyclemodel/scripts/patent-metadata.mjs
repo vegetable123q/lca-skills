@@ -16,11 +16,50 @@ const knownSourceKeys = new Set([
   'assignee',
   'inventor',
   'priority_date',
+  'filing_date',
   'publication_date',
   'grant_date',
   'year',
   'publication_year',
 ]);
+
+export function buildPatentSourceFromGooglePatentsResult(result, context = {}) {
+  const detail = result?.detail || {};
+  const publicationNumber = result?.publication_number || detail.publication_number || '';
+  const publicationDate = result?.publication_date || detail.publication_date || '';
+  const priorityDate = result?.priority_date || detail.priority_date || '';
+  const filingDate = result?.filing_date || detail.filing_date || '';
+  const grantDate = result?.grant_date || detail.grant_date || '';
+  const year =
+    result?.year ||
+    result?.publication_year ||
+    yearFromDate(publicationDate) ||
+    yearFromDate(priorityDate) ||
+    yearFromDate(grantDate) ||
+    '';
+
+  return compactObject({
+    type: 'patent',
+    id: publicationNumber,
+    title: result?.title || detail.title || '',
+    assignee: result?.assignee || detail.assignee || '',
+    inventor: result?.inventor || detail.inventor || '',
+    priority_date: priorityDate,
+    filing_date: filingDate,
+    publication_date: publicationDate,
+    grant_date: grantDate,
+    year,
+    url: result?.link || detail.url || '',
+    pdf_url: result?.pdf_link || detail.pdf_link || result?.pdf_url || '',
+    family_members: detail.family_members?.length ? detail.family_members : undefined,
+    cited_patents: detail.cited_patents?.length ? detail.cited_patents : undefined,
+    cited_by_patents: detail.cited_by_patents?.length ? detail.cited_by_patents : undefined,
+    similar_documents: detail.similar_documents?.length ? detail.similar_documents : undefined,
+    google_patents_rank: Number.isFinite(result?.rank) ? result.rank : undefined,
+    source_query: context.query || result?.source_query || '',
+    product_name: context.productName || '',
+  });
+}
 
 export function buildPatentSourceMetadata(plan) {
   const source = plan?.source || {};
@@ -45,6 +84,7 @@ export function buildPatentSourceMetadata(plan) {
     assignee: source.assignee || '',
     inventor: source.inventor || '',
     priority_date: source.priority_date || '',
+    filing_date: source.filing_date || '',
     publication_date: source.publication_date || '',
     grant_date: source.grant_date || '',
     year: year ? String(year) : '',

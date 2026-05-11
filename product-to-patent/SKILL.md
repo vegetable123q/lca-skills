@@ -102,6 +102,40 @@ Use `assets/ncm811-query-plan.json` as the starting plan for NCM811 cathode sear
 
 Expand only after reviewing the first metadata export. Add CPC terms such as `H01M4/525` only when Google Patents result groups or reviewed candidates confirm the classification is useful for the target chemistry.
 
+## Product -> Patent -> Lifecyclemodel Loop
+
+For a complete query-driven handoff, run the combined workflow script:
+
+```bash
+node product-to-patent/scripts/product-patent-lifecyclemodel-workflow.mjs \
+  --query '"NCM811" cathode "preparation method"' \
+  --product-name "NCM811 cathode active material" \
+  --max-results 10 \
+  --out-dir output/product-to-patent-lifecyclemodel/ncm811-cathode \
+  --download-images \
+  --image-mode flow \
+  --skip-existing
+```
+
+The workflow performs the Google Patents metadata search, saves `metadata/google-patents-metadata.json`, downloads each patent page/PDF candidate into `raw/`, extracts process-flow candidate figures when requested, and writes a structured `workflow-manifest.json`. Each patent also gets:
+
+- `patents/<PUBLICATION>/source-metadata.json`: normalized patent source metadata, including company/assignee, priority/filing/publication/grant dates, links, family/citation signals, and download status.
+- `patents/<PUBLICATION>/plan-source.json`: a compact handoff for authoring `patents/<PUBLICATION>/lifecyclemodel/plan.json`.
+- `patents/<PUBLICATION>/lifecyclemodel/`: the base directory passed to `$patent-to-lifecyclemodel`.
+
+After authoring a plan from the downloaded full text, rerun with `--run-lifecyclemodels` to execute every patent directory that already has `lifecyclemodel/plan.json`:
+
+```bash
+node product-to-patent/scripts/product-patent-lifecyclemodel-workflow.mjs \
+  --query '"NCM811" cathode "preparation method"' \
+  --product-name "NCM811 cathode active material" \
+  --out-dir output/product-to-patent-lifecyclemodel/ncm811-cathode \
+  --skip-existing \
+  --run-lifecyclemodels
+```
+
+When converting, copy the `source` object from `plan-source.json` into `plan.json`. The `$patent-to-lifecyclemodel` metadata interface preserves that source object into lifecyclemodel basic info, so company, publication year, patent URL, PDF URL, and family metadata remain attached to the generated model.
+
 ## Family Review Rules
 
 - Do not count application and grant versions as separate technical sources by default.
@@ -133,9 +167,11 @@ For every selected source family, record:
 
 ```bash
 node --test test/product-to-patent-google-patents.test.mjs
+node --test test/product-to-patent-lifecyclemodel-workflow.test.mjs
 node product-to-patent/scripts/google-patents-metadata.mjs --help
 node product-to-patent/scripts/google-patents-download-fulltext.mjs --help
 node product-to-patent/scripts/google-patents-batch-pipeline.mjs --help
+node product-to-patent/scripts/product-patent-lifecyclemodel-workflow.mjs --help
 node scripts/validate-skills.mjs product-to-patent
 ```
 
@@ -144,6 +180,7 @@ node scripts/validate-skills.mjs product-to-patent
 - `scripts/google-patents-metadata.mjs`: download search metadata and per-result detail signals from Google Patents.
 - `scripts/google-patents-download-fulltext.mjs`: download full text for identified publications with rate limiting and multiple fetch strategies.
 - `scripts/google-patents-batch-pipeline.mjs`: batch pipeline for large-scale discovery + download (800+ patents).
+- `scripts/product-patent-lifecyclemodel-workflow.mjs`: query-driven metadata, patent download, source handoff, and optional authored-plan lifecyclemodel execution loop.
 - `references/google-patents-workflow.zh-CN.md`: query, metadata, crawler, and family-review guidance.
 - `assets/ncm811-query-plan.json`: example product-to-query plan for NCM811 cathode.
 - `assets/reviewed-candidates.template.json`: reviewed handoff format for downstream conversion.

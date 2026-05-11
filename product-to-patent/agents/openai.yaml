@@ -1,4 +1,4 @@
 interface:
   display_name: "Product to Patent"
   short_description: "Find candidate patents from a product description"
-  default_prompt: "Use $product-to-patent to find and triage Google Patents candidates for an NCM811 cathode product, download full text with process-flow candidate figures when useful, deduplicate patent families, and prepare reviewed source links for downstream patent-to-lifecyclemodel work."
+  default_prompt: "Use $product-to-patent to find and triage Google Patents candidates for an NCM811 cathode product, download full text with process-flow candidate figures when useful, deduplicate patent families, and when the user wants a closed loop run product-patent-lifecyclemodel-workflow.mjs to save metadata, patent downloads, source handoff files, and lifecyclemodel conversion queues that preserve company, dates, patent links, PDFs, and family metadata for downstream patent-to-lifecyclemodel work."

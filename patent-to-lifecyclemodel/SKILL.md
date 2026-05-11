@@ -97,6 +97,8 @@ Reruns preserve `uuids.json` when present; keep that file when correcting previo
 
 Preserve patent source metadata in `source` whenever it is available. Company/assignee and the best patent year are copied into `manifests/lifecyclemodel-manifest.json.basic_info.source`, and additional source metadata such as patent URLs or family members is retained under `basic_info.source.extra_metadata`, so the downstream lifecyclemodel builder and publish manifests can distinguish otherwise similar patent-derived models.
 
+When `$product-to-patent` is used first, read `patents/<PUBLICATION>/plan-source.json` from the combined workflow output and copy its `source` object directly into `plan.source`. That object is produced by `buildPatentSourceFromGooglePatentsResult`, the dedicated metadata handoff interface for Google Patents rows. It normalizes publication number, title, company/assignee, inventor, priority/filing/publication/grant dates, best year, Google Patents URL, PDF URL, family members, citation signals, source query, and product name before lifecyclemodel materialization.
+
 ## Verify
 
 ```bash
@@ -109,6 +111,11 @@ cat output/<SOURCE>/publish-run/publish-report.json
 Expected: process count matches the plan, edges connect shared flows, no publish failures, and no black-box process unless the plan documents a critical data gap.
 Also verify `output/patent-to-lifecyclemodel-flow-scope.json` was generated from the remote database through the TianGong CLI unless every plan flow was directly covered by `existing_flow_ref` or the exact used-flow cache, `flow-resolution.json` reuses database flows automatically where candidates exist, inputs do not resolve to emission-side elementary flows, the flow publish report only prepares or commits unresolved generated flows used by process exchanges, lifecyclemodel `json_tg.xflow.nodes[*].data.label` is a TIDAS localized name object rather than a plain string, each node has unique `ports.items` for process inputs and outputs, lifecyclemodel edges connect the intermediate flow with `source.port = OUTPUT:<flowUUID>` and `target.port = INPUT:<flowUUID>` when available, the native TIDAS `lifeCycleModelInformation.quantitativeReference.referenceToReferenceProcess` points to the final-product process instance and is projected to that node's existing `data.quantitativeReference = "1"` UI field, and process exchange references scan as `exists_in_target`.
 For a clean rerun, remove generated run directories but keep `plan.json` and `uuids.json`.
+
+```bash
+node --test test/patent-to-lifecyclemodel-source-metadata.test.mjs
+node --test test/product-to-patent-lifecyclemodel-workflow.test.mjs
+```
 
 ## References
 
