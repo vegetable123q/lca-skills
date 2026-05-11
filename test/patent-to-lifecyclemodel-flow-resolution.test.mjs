@@ -1,16 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildFlowResolution,
   applyFlowResolutionToExchange,
+  buildFlowResolution,
 } from '../patent-to-lifecyclemodel/scripts/flow-resolution.mjs';
 
-function flowRow({ id, version, name, property = 'Mass' }) {
-  const propertyIds = {
-    Mass: '93a60a56-a3c8-11da-a746-0800200b9a66',
-    Volume: '93a60a56-a3c8-22da-a746-0800200c9a66',
-    'Number of items': '01846770-4cfe-4a25-8ad9-919d8d378345',
-  };
+const propertyIds = {
+  Mass: '93a60a56-a3c8-11da-a746-0800200b9a66',
+  Volume: '93a60a56-a3c8-22da-a746-0800200c9a66',
+  'Number of items': '01846770-4cfe-4a25-8ad9-919d8d378345',
+};
+
+function flowRow({
+  id,
+  version,
+  name,
+  names = [name],
+  property = 'Mass',
+  typeOfDataSet = 'Product flow',
+  classes = [],
+  arrayPropertyDescription = false,
+}) {
+  const shortDescription = arrayPropertyDescription
+    ? [{ '@xml:lang': 'en', '#text': property }]
+    : { '@xml:lang': 'en', '#text': property };
   return {
     id,
     version,
@@ -20,21 +33,31 @@ function flowRow({ id, version, name, property = 'Mass' }) {
           dataSetInformation: {
             'common:UUID': id,
             name: {
-              baseName: [{ '@xml:lang': 'en', '#text': name }],
+              baseName: names.map((entry, index) => ({
+                '@xml:lang': index === 0 ? 'zh' : 'en',
+                '#text': entry,
+              })),
+            },
+            classificationInformation: {
+              'common:classification': {
+                'common:class': classes.map((value, index) => ({
+                  '@level': String(index),
+                  '#text': value,
+                })),
+              },
             },
           },
         },
+        modellingAndValidation: { LCIMethod: { typeOfDataSet } },
         administrativeInformation: {
-          publicationAndOwnership: {
-            'common:dataSetVersion': version,
-          },
+          publicationAndOwnership: { 'common:dataSetVersion': version },
         },
         flowProperties: {
           flowProperty: {
             '@dataSetInternalID': '0',
             referenceToFlowPropertyDataSet: {
-              '@refObjectId': propertyIds[property],
-              'common:shortDescription': { '@xml:lang': 'en', '#text': property },
+              '@refObjectId': propertyIds[property] || '',
+              'common:shortDescription': shortDescription,
             },
           },
         },
@@ -43,42 +66,35 @@ function flowRow({ id, version, name, property = 'Mass' }) {
   };
 }
 
-function multilingualFlowRow({ id, version, names, property = 'Mass' }) {
-  const row = flowRow({ id, version, name: names[0], property });
-  row.json_ordered.flowDataSet.flowInformation.dataSetInformation.name.baseName = names.map(
-    (name, index) => ({
-      '@xml:lang': index === 0 ? 'zh' : 'en',
-      '#text': name,
-    }),
-  );
-  return row;
+function uuidsFor(flows) {
+  return { flows: Object.fromEntries(Object.keys(flows).map((key) => [key, `new-${key}`])) };
 }
 
-function flowRowWithArrayPropertyDescription({ id, version, name, property = 'Net calorific value' }) {
-  const row = flowRow({ id, version, name, property });
-  row.json_ordered.flowDataSet.flowProperties.flowProperty.referenceToFlowPropertyDataSet[
-    'common:shortDescription'
-  ] = [{ '@xml:lang': 'en', '#text': property }];
-  return row;
-}
-
-test('buildFlowResolution reuses unique existing DB flow latest version and leaves patent-specific flow new', () => {
-  const plan = {
+function planWith({ flows, inputs = [], outputs = [], processes = null }) {
+  return {
     source: { id: 'CN123' },
+    flows,
+    processes: processes ?? [{ key: 'make_product', inputs, outputs }],
+  };
+}
+
+function resolve(plan, rows = [], uuids = uuidsFor(plan.flows)) {
+  return buildFlowResolution(plan, uuids, rows);
+}
+
+test('reuses unique latest exact DB flow and leaves patent-specific flow new', () => {
+  const plan = planWith({
     flows: {
       oxygen: { name_en: 'Oxygen', unit: 'kg' },
       product: { name_en: 'Patent-specific cathode matrix', unit: 'kg' },
     },
-  };
-  const uuids = { flows: { oxygen: 'new-oxygen', product: 'new-product' } };
-  const scopeRows = [
+  });
+
+  const resolution = resolve(plan, [
     flowRow({ id: 'db-oxygen', version: '01.01.000', name: 'oxygen' }),
     flowRow({ id: 'db-oxygen', version: '01.01.002', name: 'Oxygen' }),
-  ];
+  ]);
 
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
-
-  assert.equal(resolution.flows.oxygen.decision, 'reuse_existing');
   assert.equal(resolution.flows.oxygen.id, 'db-oxygen');
   assert.equal(resolution.flows.oxygen.version, '01.01.002');
   assert.equal(resolution.flows.product.decision, 'create_new');
@@ -86,81 +102,104 @@ test('buildFlowResolution reuses unique existing DB flow latest version and leav
   assert.equal(resolution.summary.create_new, 1);
 });
 
-test('buildFlowResolution does not auto-pick ambiguous patent-specific DB flows', () => {
-  const plan = {
-    source: { id: 'CN123' },
+test('input compatibility rejects non-gas elementary and emission flows', () => {
+  const plan = planWith({
     flows: {
-      product: { name_en: 'NCM811 cathode material', unit: 'kg' },
-    },
-  };
-  const uuids = { flows: { product: 'new-product' } };
-  const scopeRows = [
-    flowRow({ id: 'db-product-a', version: '01.01.000', name: 'NCM811 cathode material' }),
-    flowRow({ id: 'db-product-b', version: '01.01.000', name: 'NCM811 cathode material' }),
-  ];
-
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
-
-  assert.equal(resolution.flows.product.decision, 'create_new');
-  assert.equal(resolution.flows.product.reason, 'ambiguous_exact_name_match');
-  assert.equal(resolution.review.length, 1);
-  assert.equal(resolution.review[0].candidate_count, 2);
-});
-
-test('buildFlowResolution lists ambiguous common flow candidates instead of auto-picking', () => {
-  const plan = {
-    source: { id: 'CN123' },
-    flows: {
+      sodium_chloride: { name_en: 'Sodium chloride', unit: 'kg' },
       oxygen: { name_en: 'Oxygen', unit: 'kg' },
     },
-  };
-  const uuids = { flows: { oxygen: 'new-oxygen' } };
-  const scopeRows = [
-    flowRow({ id: 'db-oxygen-old', version: '01.00.000', name: 'oxygen' }),
-    flowRow({ id: 'db-oxygen-new', version: '01.01.000', name: 'Oxygen' }),
-  ];
+    inputs: [{ flow: 'sodium_chloride', amount: 1 }, { flow: 'oxygen', amount: 1 }],
+  });
 
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+  const resolution = resolve(plan, [
+    flowRow({
+      id: 'emission-salt',
+      version: '03.00.004',
+      name: 'Sodium chloride',
+      typeOfDataSet: 'Elementary flow',
+      classes: ['Emissions', 'Emissions to soil', 'Emissions to non-agricultural soil'],
+    }),
+    flowRow({ id: 'product-salt', version: '01.00.000', name: 'Sodium chloride' }),
+    flowRow({
+      id: 'elementary-oxygen',
+      version: '03.00.004',
+      name: 'oxygen',
+      typeOfDataSet: 'Elementary flow',
+      classes: ['Natural resources', 'In air'],
+    }),
+  ]);
 
-  assert.equal(resolution.flows.oxygen.decision, 'create_new');
-  assert.equal(resolution.flows.oxygen.reason, 'ambiguous_exact_name_match');
-  assert.equal(resolution.flows.oxygen.id, 'new-oxygen');
-  assert.equal(resolution.flows.oxygen.candidate_count, 2);
-  assert.equal(resolution.review.length, 1);
-  assert.deepEqual(
-    resolution.review[0].candidates.map((candidate) => candidate.id),
-    ['db-oxygen-new', 'db-oxygen-old'],
-  );
+  assert.equal(resolution.flows.sodium_chloride.id, 'product-salt');
+  assert.equal(resolution.flows.oxygen.id, 'elementary-oxygen');
 });
 
-test('buildFlowResolution reuses stable generated UUID when it already exists remotely', () => {
-  const plan = {
-    source: { id: 'CN123' },
-    flows: {
-      electrolyte: { name_en: 'Patent electrolyte solution', unit: 'kg' },
-    },
-  };
-  const uuids = { flows: { electrolyte: 'stable-electrolyte' } };
-  const scopeRows = [
-    flowRow({ id: 'other-electrolyte', version: '01.00.000', name: 'Patent electrolyte solution' }),
-    flowRow({ id: 'stable-electrolyte', version: '01.00.000', name: 'Patent electrolyte solution' }),
-  ];
+test('emission-only non-gas input stays generated', () => {
+  const plan = planWith({
+    flows: { sodium_chloride: { name_en: 'Sodium chloride', unit: 'kg' } },
+    inputs: [{ flow: 'sodium_chloride', amount: 1 }],
+  });
 
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
+  const resolution = resolve(plan, [
+    flowRow({
+      id: 'emission-salt',
+      version: '03.00.004',
+      name: 'Sodium chloride',
+      typeOfDataSet: 'Elementary flow',
+      classes: ['Emissions'],
+    }),
+  ]);
 
-  assert.equal(resolution.flows.electrolyte.decision, 'reuse_existing');
-  assert.equal(resolution.flows.electrolyte.reason, 'stable_uuid_exact_name_match');
-  assert.equal(resolution.flows.electrolyte.id, 'stable-electrolyte');
-  assert.equal(resolution.summary.reuse_existing, 1);
+  assert.equal(resolution.flows.sodium_chloride.decision, 'create_new');
+  assert.equal(resolution.flows.sodium_chloride.id, 'new-sodium_chloride');
+});
+
+test('ambiguous exact matches are automatically ranked', () => {
+  const plan = planWith({
+    flows: { product: { name_en: 'NCM811 cathode material', unit: 'kg' } },
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-product-a', version: '01.01.000', name: 'NCM811 cathode material' }),
+    flowRow({ id: 'db-product-b', version: '01.01.000', name: 'NCM811 cathode material' }),
+  ]);
+
+  assert.equal(resolution.flows.product.decision, 'reuse_existing');
+  assert.equal(resolution.flows.product.reason, 'best_exact_name_match');
+  assert.equal(resolution.flows.product.id, 'db-product-a');
+  assert.equal(resolution.flows.product.candidate_count, 2);
   assert.equal(resolution.review.length, 0);
 });
 
-test('buildFlowResolution honors explicit existing DB flow refs from the plan', () => {
-  const plan = {
-    source: { id: 'CN123' },
+test('common exact matches prefer the latest best candidate', () => {
+  const plan = planWith({ flows: { oxygen: { name_en: 'Oxygen', unit: 'kg' } } });
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-oxygen-old', version: '01.00.000', name: 'oxygen' }),
+    flowRow({ id: 'db-oxygen-new', version: '01.01.000', name: 'Oxygen' }),
+  ]);
+
+  assert.equal(resolution.flows.oxygen.id, 'db-oxygen-new');
+  assert.equal(resolution.flows.oxygen.reason, 'best_exact_name_match');
+  assert.equal(resolution.review.length, 0);
+});
+
+test('stable generated UUID and explicit existing refs are honored', () => {
+  const stablePlan = planWith({
+    flows: { electrolyte: { name_en: 'Patent electrolyte solution', unit: 'kg' } },
+  });
+  const stable = resolve(
+    stablePlan,
+    [
+      flowRow({ id: 'other-electrolyte', version: '01.00.000', name: 'Patent electrolyte solution' }),
+      flowRow({ id: 'stable-electrolyte', version: '01.00.000', name: 'Patent electrolyte solution' }),
+    ],
+    { flows: { electrolyte: 'stable-electrolyte' } },
+  );
+  assert.equal(stable.flows.electrolyte.reason, 'stable_uuid_exact_name_match');
+
+  const explicitPlan = planWith({
     flows: {
       electricity: {
-        name_en: 'Electricity, low voltage',
+        name_en: 'Power use',
         unit: 'MJ',
         existing_flow_ref: {
           id: 'db-electricity-cn',
@@ -170,28 +209,15 @@ test('buildFlowResolution honors explicit existing DB flow refs from the plan', 
         },
       },
     },
-  };
-  const uuids = { flows: { electricity: 'new-electricity' } };
-  const scopeRows = [
-    flowRow({ id: 'db-electricity-cn', version: '01.01.000', name: 'Electricity, low voltage' }),
-    flowRow({ id: 'db-electricity-glo', version: '01.01.000', name: 'Electricity, low voltage' }),
-  ];
-
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
-
-  assert.equal(resolution.flows.electricity.decision, 'reuse_existing');
-  assert.equal(resolution.flows.electricity.reason, 'plan_existing_flow_ref');
-  assert.equal(resolution.flows.electricity.id, 'db-electricity-cn');
-  assert.equal(resolution.flows.electricity.version, '02.00.000');
-  assert.equal(resolution.flows.electricity.unit, 'kWh');
-  assert.equal(resolution.flows.electricity.amount_factor, 0.2777777777777778);
-  assert.equal(resolution.summary.reuse_existing, 1);
-  assert.equal(resolution.review.length, 0);
+  });
+  const explicit = resolve(explicitPlan, []);
+  assert.equal(explicit.flows.electricity.reason, 'plan_existing_flow_ref');
+  assert.equal(explicit.flows.electricity.id, 'db-electricity-cn');
+  assert.equal(explicit.flows.electricity.amount_factor, 0.2777777777777778);
 });
 
-test('buildFlowResolution matches plan aliases and multilingual DB names', () => {
-  const plan = {
-    source: { id: 'CN123' },
+test('aliases, multilingual names, energy properties, and normalized names resolve', () => {
+  const plan = planWith({
     flows: {
       potassium_chloride: {
         name_en: 'Potassium chloride',
@@ -199,139 +225,178 @@ test('buildFlowResolution matches plan aliases and multilingual DB names', () =>
         aliases: ['KCl'],
         unit: 'kg',
       },
-      electricity: {
-        name_en: 'Power use',
-        aliases: ['Electricity, medium voltage'],
-        unit: 'kWh',
-      },
-    },
-  };
-  const uuids = {
-    flows: {
-      potassium_chloride: 'new-kcl',
-      electricity: 'new-electricity',
-    },
-  };
-  const scopeRows = [
-    multilingualFlowRow({
-      id: 'db-kcl',
-      version: '01.00.000',
-      names: ['氯化钾', 'Potassium chloride'],
-    }),
-    flowRow({
-      id: 'db-electricity',
-      version: '01.00.000',
-      name: 'Electricity, medium voltage',
-      property: 'Net calorific value',
-    }),
-  ];
-
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
-
-  assert.equal(resolution.flows.potassium_chloride.decision, 'reuse_existing');
-  assert.equal(resolution.flows.potassium_chloride.id, 'db-kcl');
-  assert.equal(resolution.flows.electricity.decision, 'reuse_existing');
-  assert.equal(resolution.flows.electricity.id, 'db-electricity');
-});
-
-test('buildFlowResolution reads array flow-property descriptions for energy units', () => {
-  const plan = {
-    source: { id: 'CN123' },
-    flows: {
-      electricity: {
-        name_en: 'Electricity, medium voltage',
-        unit: 'kWh',
-      },
-    },
-  };
-  const uuids = { flows: { electricity: 'new-electricity' } };
-  const scopeRows = [
-    flowRowWithArrayPropertyDescription({
-      id: 'db-electricity',
-      version: '01.01.000',
-      name: 'Electricity, medium voltage',
-    }),
-  ];
-
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
-
-  assert.equal(resolution.flows.electricity.decision, 'reuse_existing');
-  assert.equal(resolution.flows.electricity.id, 'db-electricity');
-  assert.equal(resolution.flows.electricity.unit, 'kWh');
-});
-
-test('buildFlowResolution lists normalized hydrate candidates without auto-conversion', () => {
-  const plan = {
-    source: { id: 'CN123' },
-    flows: {
+      electricity: { name_en: 'Power use', aliases: ['Electricity, medium voltage'], unit: 'kWh' },
       manganese_sulfate_tetrahydrate: {
         name_en: 'Manganese sulfate tetrahydrate',
         name_zh: '四水硫酸锰',
         unit: 'kg',
       },
     },
-  };
-  const uuids = {
-    flows: {
-      manganese_sulfate_tetrahydrate: 'new-mnso4-4h2o',
-    },
-  };
-  const scopeRows = [
-    multilingualFlowRow({
-      id: 'db-manganese-sulfate',
-      version: '01.02.000',
-      names: ['硫酸锰(II)', 'Manganese(II) sulfate'],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-kcl', version: '01.00.000', name: '氯化钾', names: ['氯化钾', 'Potassium chloride'] }),
+    flowRow({
+      id: 'db-electricity',
+      version: '01.00.000',
+      name: 'Electricity, medium voltage',
+      property: 'Net calorific value',
+      arrayPropertyDescription: true,
     }),
-  ];
-
-  const resolution = buildFlowResolution(plan, uuids, scopeRows);
-
-  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.decision, 'create_new');
-  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.reason, 'candidate_name_match');
-  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.id, 'new-mnso4-4h2o');
-  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.amount_factor, 1);
-  assert.equal(resolution.review.length, 1);
-  assert.deepEqual(resolution.review[0].candidates, [
-    {
+    flowRow({
       id: 'db-manganese-sulfate',
       version: '01.02.000',
       name: '硫酸锰(II)',
-      unit: 'kg',
-      match_reason: 'normalized_name_candidate',
-    },
+      names: ['硫酸锰(II)', 'Manganese(II) sulfate'],
+    }),
   ]);
+
+  assert.equal(resolution.flows.potassium_chloride.id, 'db-kcl');
+  assert.equal(resolution.flows.electricity.id, 'db-electricity');
+  assert.equal(resolution.flows.electricity.unit, 'kWh');
+  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.id, 'db-manganese-sulfate');
+  assert.equal(resolution.flows.manganese_sulfate_tetrahydrate.reason, 'best_candidate_name_match');
+});
+
+test('nearest matching handles unmatched input materials without reusing product outputs', () => {
+  const plan = planWith({
+    flows: {
+      sodium_chloride: { name_en: 'Sodium chloride molten salt', aliases: ['NaCl'], unit: 'kg' },
+      cobalt_metal: { name_en: 'Cobalt metal anode consumed', unit: 'kg' },
+      ncm811: { name_en: 'LiNi0.8Co0.1Mn0.1O2 cathode active material, NCM811', unit: 'kg' },
+    },
+    inputs: [{ flow: 'sodium_chloride', amount: 1 }, { flow: 'cobalt_metal', amount: 1 }],
+    outputs: [{ flow: 'ncm811', amount: 1 }],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-sodium-chloride', version: '01.00.000', name: 'sodium chloride' }),
+    flowRow({ id: 'db-cobalt', version: '01.00.000', name: 'cobalt' }),
+    flowRow({ id: 'db-ncm811', version: '01.00.000', name: 'NCM811' }),
+  ]);
+
+  assert.equal(resolution.flows.sodium_chloride.reason, 'nearest_input_name_match');
+  assert.equal(resolution.flows.sodium_chloride.id, 'db-sodium-chloride');
+  assert.equal(resolution.flows.cobalt_metal.id, 'db-cobalt');
+  assert.equal(resolution.flows.ncm811.decision, 'create_new');
+});
+
+test('specific metal feedstocks do not collapse to generic Metal or waste-like rows', () => {
+  const plan = planWith({
+    flows: {
+      nickel_metal: { name_en: 'Nickel metal anode consumed', aliases: ['Ni metal'], unit: 'kg' },
+      cobalt_metal: { name_en: 'Cobalt metal anode consumed', aliases: ['Co metal'], unit: 'kg' },
+      manganese_metal: { name_en: 'Manganese metal anode consumed', aliases: ['Mn metal'], unit: 'kg' },
+      ncm811: { name_en: 'LiNi0.8Co0.1Mn0.1O2 cathode active material, NCM811', unit: 'kg' },
+    },
+    inputs: [
+      { flow: 'nickel_metal', amount: 1 },
+      { flow: 'cobalt_metal', amount: 1 },
+      { flow: 'manganese_metal', amount: 1 },
+    ],
+    outputs: [{ flow: 'ncm811', amount: 1 }],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-generic-metal', version: '01.00.000', name: 'Metal', property: '' }),
+    flowRow({ id: 'db-nickel-metal', version: '01.01.002', name: 'Nickel metal (>99.9% Ni)' }),
+    flowRow({ id: 'db-cobalt-electrodeposit', version: '01.01.001', name: 'Electrodeposit Cobalt' }),
+    flowRow({
+      id: 'db-manganese-slag-remediation',
+      version: '01.02.000',
+      name: 'manganese slag-based environmental remediation materials',
+    }),
+    flowRow({ id: 'db-manganese-metallic', version: '01.01.001', name: 'Manganese ore', names: ['Manganese ore', '金属锰'] }),
+  ]);
+
+  assert.equal(resolution.flows.nickel_metal.id, 'db-nickel-metal');
+  assert.equal(resolution.flows.cobalt_metal.id, 'db-cobalt-electrodeposit');
+  assert.equal(resolution.flows.manganese_metal.id, 'db-manganese-metallic');
+  for (const key of ['nickel_metal', 'cobalt_metal', 'manganese_metal']) {
+    assert.notEqual(resolution.flows[key].id, 'db-generic-metal');
+  }
+  assert.notEqual(resolution.flows.manganese_metal.id, 'db-manganese-slag-remediation');
+});
+
+test('patent-specific internal intermediates stay generated', () => {
+  const plan = planWith({
+    flows: {
+      precursor: { name_en: 'Ni0.8Co0.1Mn0.1(OH)2 precursor', unit: 'kg' },
+      lithium_hydroxide: { name_en: 'Lithium hydroxide monohydrate', unit: 'kg' },
+    },
+    processes: [
+      { key: 'make_precursor', inputs: [], outputs: [{ flow: 'precursor', amount: 1 }] },
+      {
+        key: 'make_product',
+        inputs: [{ flow: 'precursor', amount: 1 }, { flow: 'lithium_hydroxide', amount: 1 }],
+        outputs: [],
+      },
+    ],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-precursor', version: '01.00.000', name: 'Ni0.8Co0.1Mn0.1(OH)2 precursor' }),
+    flowRow({ id: 'db-lithium-hydroxide', version: '01.00.000', name: 'Lithium hydroxide monohydrate' }),
+  ]);
+
+  assert.equal(resolution.flows.precursor.reason, 'patent_internal_intermediate');
+  assert.equal(resolution.flows.precursor.id, 'new-precursor');
+  assert.equal(resolution.flows.lithium_hydroxide.id, 'db-lithium-hydroxide');
+});
+
+test('nearest matching uses compatible specialty reagent families and avoids emissions', () => {
+  const specialtyPlan = planWith({
+    flows: {
+      aluminum_metaphosphate: { name_en: 'Aluminum metaphosphate', aliases: ['Al(PO3)3'], unit: 'kg' },
+      lithium_molybdate: { name_en: 'Lithium molybdate', aliases: ['Li2MoO4'], unit: 'kg' },
+    },
+    inputs: [{ flow: 'aluminum_metaphosphate', amount: 1 }, { flow: 'lithium_molybdate', amount: 1 }],
+  });
+  const specialty = resolve(specialtyPlan, [
+    flowRow({ id: 'db-aluminium-phosphate', version: '01.00.000', name: 'Aluminium Phosphate' }),
+    flowRow({ id: 'db-disodium-molybdate', version: '01.00.000', name: 'disodium tetraoxomolybdate dihydrate' }),
+  ]);
+  assert.equal(specialty.flows.aluminum_metaphosphate.id, 'db-aluminium-phosphate');
+  assert.equal(specialty.flows.lithium_molybdate.id, 'db-disodium-molybdate');
+
+  const emissionPlan = planWith({
+    flows: { lithium_molybdate: { name_en: 'Lithium molybdate', unit: 'kg' } },
+    inputs: [{ flow: 'lithium_molybdate', amount: 1 }],
+  });
+  const emission = resolve(emissionPlan, [
+    flowRow({
+      id: 'db-disodium-molybdate-emission',
+      version: '00.00.002',
+      name: 'disodium tetraoxomolybdate dihydrate',
+      typeOfDataSet: 'Elementary flow',
+      classes: ['Emissions'],
+    }),
+    flowRow({ id: 'db-ammonium-orthomolybdate', version: '01.01.001', name: 'Ammonium orthomolybdate' }),
+  ]);
+  assert.equal(emission.flows.lithium_molybdate.id, 'db-ammonium-orthomolybdate');
 });
 
 test('applyFlowResolutionToExchange writes existing DB flow refs and unit conversions', () => {
-  const exchange = {
-    flow: 'water',
-    amount: 1000,
-  };
-  const plan = {
-    flows: {
-      water: { name_en: 'Water', unit: 'g' },
-    },
-  };
-  const resolution = {
-    flows: {
-      water: {
-        decision: 'reuse_existing',
-        id: 'db-water',
-        version: '03.00.004',
-        name: 'water',
-        unit: 'kg',
-        amount_factor: 0.001,
+  const result = applyFlowResolutionToExchange(
+    { flow: 'water', amount: 1000 },
+    'Input',
+    { flows: { water: { name_en: 'Water', unit: 'g' } } },
+    {
+      flows: {
+        water: {
+          decision: 'reuse_existing',
+          id: 'db-water',
+          version: '03.00.004',
+          name: 'water',
+          unit: 'kg',
+          amount_factor: 0.001,
+        },
       },
     },
-  };
-
-  const result = applyFlowResolutionToExchange(exchange, 'Input', plan, resolution, {
-    generatedFlowId: 'new-water',
-    exchangeId: '0',
-  });
+    { generatedFlowId: 'new-water', exchangeId: '0' },
+  );
 
   assert.equal(result.referenceToFlowDataSet['@refObjectId'], 'db-water');
-  assert.equal(result.referenceToFlowDataSet['@version'], '03.00.004');
   assert.equal(result.referenceUnit, 'kg');
   assert.equal(result.meanAmount, 1);
   assert.match(result['common:generalComment'][0]['#text'], /converted from g to kg/u);

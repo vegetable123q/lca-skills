@@ -115,6 +115,42 @@ test('buildPatentFlowRowsFromPlan only emits flow datasets that need creation', 
   );
 });
 
+test('buildPatentFlowRowsFromPlan does not emit unused generated plan flows', () => {
+  const plan = {
+    source: { id: 'CN123' },
+    flows: {
+      unused_precursor: { name_en: 'Unused precursor placeholder', unit: 'kg' },
+      used_product: { name_en: 'Used patent product', unit: 'kg' },
+    },
+    processes: [
+      {
+        key: 'make_product',
+        inputs: [],
+        outputs: [{ flow: 'used_product', amount: 1 }],
+      },
+    ],
+  };
+  const uuids = {
+    flows: {
+      unused_precursor: 'unused-flow-id',
+      used_product: 'used-flow-id',
+    },
+  };
+  const resolution = {
+    flows: {
+      unused_precursor: { decision: 'create_new', id: 'unused-flow-id', version: '01.00.000' },
+      used_product: { decision: 'create_new', id: 'used-flow-id', version: '01.00.000' },
+    },
+  };
+
+  const rows = buildPatentFlowRowsFromPlan(plan, uuids, { resolution });
+
+  assert.deepEqual(
+    rows.map((row) => row.id),
+    ['used-flow-id'],
+  );
+});
+
 test('writePatentFlowExports removes stale flow export files', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ptl-flow-exports-'));
   const staleFile = path.join(base, 'runs', 'combined', 'exports', 'flows', 'stale.json');

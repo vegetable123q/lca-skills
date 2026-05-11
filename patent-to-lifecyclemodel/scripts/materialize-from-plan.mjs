@@ -36,6 +36,13 @@ import {
 import { requireRemoteFlowScopeFile } from './remote-flow-scope.mjs';
 import { combinedRunNameFromSourceId } from './run-names.mjs';
 import { buildPatentLifecyclemodelManifest } from './patent-metadata.mjs';
+import {
+  applyUsedFlowCacheToPlan,
+  defaultUsedFlowCachePath,
+  loadUsedFlowCache,
+  unresolvedFlowKeysForRemoteScope,
+  updateUsedFlowCacheFromResolution,
+} from './used-flow-cache.mjs';
 import { buildPlanUuids, readExistingUuids } from './uuid-plan.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,11 +54,9 @@ const arg = (f, d = null) => { const i = argv.indexOf(f); return i === -1 ? d : 
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--flow-scope-file <flows.json|jsonl>] [--no-remote-flow-scope] [--seed <seed>] [--json]
+  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan <plan.json> --base <output-dir> [--seed <seed>] [--json]
 
 Examples:
-  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --flow-scope-file output/db-flows.json --json
-  node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --no-remote-flow-scope --json
   node patent-to-lifecyclemodel/scripts/materialize-from-plan.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --seed cn111725499b
 `.trim());
 }
@@ -71,6 +76,18 @@ const noRemoteFlowScope = argv.includes('--no-remote-flow-scope');
 
 if (!planPath || !baseArg) {
   console.error('materialize-from-plan: --plan and --base are required');
+  process.exit(2);
+}
+if (noRemoteFlowScope) {
+  console.error(
+    'materialize-from-plan: --no-remote-flow-scope is forbidden; materialization must fetch remote database flows through the TianGong CLI',
+  );
+  process.exit(2);
+}
+if (flowScopeFile) {
+  console.error(
+    'materialize-from-plan: --flow-scope-file is forbidden; materialization must fetch the live remote flow scope through the TianGong CLI',
+  );
   process.exit(2);
 }
 
@@ -123,12 +140,16 @@ const uuids = buildPlanUuids(plan, {
   seed,
 });
 writeJson(uuidsFile, uuids);
-let effectiveFlowScopeFile = flowScopeFile;
-if (!noRemoteFlowScope) {
+const usedFlowCacheFile = defaultUsedFlowCachePath(projectRoot);
+const usedFlowCache = loadUsedFlowCache(usedFlowCacheFile);
+applyUsedFlowCacheToPlan(plan, usedFlowCache);
+const unresolvedFlowKeys = unresolvedFlowKeysForRemoteScope(plan);
+let effectiveFlowScopeFile = null;
+let flowScopeRows = [];
+if (unresolvedFlowKeys.length > 0) {
   try {
     effectiveFlowScopeFile = requireRemoteFlowScopeFile({
       base,
-      explicitFlowScopeFile: flowScopeFile,
       repoRoot: projectRoot,
       env: process.env,
     });
@@ -138,9 +159,11 @@ if (!noRemoteFlowScope) {
     );
     process.exit(1);
   }
+  flowScopeRows = loadFlowScopeRows(effectiveFlowScopeFile);
 }
-const flowResolution = buildFlowResolution(plan, uuids, loadFlowScopeRows(effectiveFlowScopeFile));
+const flowResolution = buildFlowResolution(plan, uuids, flowScopeRows);
 writeFlowResolution(flowResolutionFile || path.join(base, 'flow-resolution.json'), flowResolution);
+updateUsedFlowCacheFromResolution(plan, flowResolution, usedFlowCacheFile);
 
 // ---------- 2. Author flow files ----------
 (plan.processes || []).forEach((proc, idx) => {

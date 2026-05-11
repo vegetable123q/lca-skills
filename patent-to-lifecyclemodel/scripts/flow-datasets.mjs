@@ -139,10 +139,24 @@ function buildFlowDataset(flowKey, flow, uuid, plan) {
   };
 }
 
+function usedFlowKeys(plan) {
+  const processes = Array.isArray(plan?.processes) ? plan.processes : [];
+  if (processes.length === 0) return null;
+  const used = new Set();
+  for (const proc of processes) {
+    for (const entry of [...(proc.inputs || []), ...(proc.outputs || [])]) {
+      if (entry?.flow) used.add(entry.flow);
+    }
+  }
+  return used;
+}
+
 export function buildPatentFlowRowsFromPlan(plan, uuids, options = {}) {
   const resolution = options.resolution || null;
+  const used = usedFlowKeys(plan);
   return Object.entries(plan?.flows || {})
     .sort(([left], [right]) => left.localeCompare(right))
+    .filter(([flowKey]) => !used || used.has(flowKey))
     .filter(([flowKey]) => resolution?.flows?.[flowKey]?.decision !== 'reuse_existing')
     .map(([flowKey, flow]) => {
       const id = resolution?.flows?.[flowKey]?.id || uuids?.flows?.[flowKey];

@@ -34,6 +34,7 @@ import {
 import { findBuiltLifecyclemodelFile } from './model-files.mjs';
 import { applyPatentPublishMetadataToBundle } from './publish-metadata.mjs';
 import { writePatentPublishRequest } from './publish-request.mjs';
+import { buildRemoteFlowScopeEnv } from './remote-flow-scope.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const skillDir = path.dirname(path.dirname(__filename));
@@ -45,11 +46,10 @@ const has = (f) => argv.includes(f);
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--flow-scope-file <flows.json|jsonl>] [--no-remote-flow-scope] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--json]
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--json]
 
 Examples:
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --json
-  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --no-remote-flow-scope --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --stage5-only --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --publish-to-db --commit --json
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base output/CN111725499B --publish-only --commit --json
@@ -80,6 +80,19 @@ const flowTargetUserIdArg = arg('--flow-target-user-id');
 const flowScopeFileArg = arg('--flow-scope-file');
 const noRemoteFlowScope = has('--no-remote-flow-scope');
 
+if (noRemoteFlowScope) {
+  console.error(
+    'run-patent-to-lifecyclemodel: --no-remote-flow-scope is forbidden; modeling must fetch remote database flows through the TianGong CLI',
+  );
+  process.exit(2);
+}
+if (flowScopeFileArg) {
+  console.error(
+    'run-patent-to-lifecyclemodel: --flow-scope-file is forbidden; modeling must fetch the live remote flow scope through the TianGong CLI',
+  );
+  process.exit(2);
+}
+
 if (commitPublish && !publishToDb) {
   console.error('run-patent-to-lifecyclemodel: --commit requires --publish-to-db or --publish-only');
   process.exit(2);
@@ -88,6 +101,10 @@ if (commitPublish && !publishToDb) {
 const runLocalStages = !publishOnly;
 const runStage5 = runLocalStages && (stage5Only || (!stage5Only && !stage6Only) || has('--all'));
 const runStage6 = runLocalStages && (stage6Only || (!stage5Only && !stage6Only) || has('--all'));
+const tiangongRuntime = buildRemoteFlowScopeEnv({
+  repoRoot: projectRoot,
+  env: process.env,
+});
 
 function cleanPathForPlanRerun(targetPath) {
   if (!planPath) return;
@@ -96,7 +113,10 @@ function cleanPathForPlanRerun(targetPath) {
 
 function runCommand(label, command, args) {
   if (!jsonMode) console.error(`[${label}]`);
-  const res = spawnSync(command, args, { stdio: jsonMode ? 'pipe' : 'inherit' });
+  const res = spawnSync(command, args, {
+    stdio: jsonMode ? 'pipe' : 'inherit',
+    env: tiangongRuntime.env,
+  });
   if (res.status !== 0) {
     if (jsonMode && res.stdout) process.stderr.write(res.stdout.toString());
     if (jsonMode && res.stderr) process.stderr.write(res.stderr.toString());
@@ -108,7 +128,7 @@ function runCommand(label, command, args) {
 
 function runFlowPublishCommand(label, command, args) {
   if (!jsonMode) console.error(`[${label}]`);
-  const res = spawnSync(command, args, { stdio: 'pipe' });
+  const res = spawnSync(command, args, { stdio: 'pipe', env: tiangongRuntime.env });
   if (res.status === 0) {
     if (!jsonMode && res.stdout) process.stdout.write(res.stdout.toString());
     if (!jsonMode && res.stderr) process.stderr.write(res.stderr.toString());
@@ -155,8 +175,6 @@ if (planPath) {
     materializeScript,
     '--plan', path.resolve(process.cwd(), planPath),
     '--base', base,
-    ...(flowScopeFileArg ? ['--flow-scope-file', path.resolve(process.cwd(), flowScopeFileArg)] : []),
-    ...(noRemoteFlowScope ? ['--no-remote-flow-scope'] : []),
     '--json',
   ]);
 }
@@ -291,7 +309,7 @@ if (publishToDb) {
   const flowRowsPath = path.join(base, 'flow-publish-rows.json');
   const flowRows = writePatentFlowPublishRowsFile(base, flowRowsPath);
   if (flowRows.rows.length > 0) {
-    const flowPublishInvocation = buildTiangongInvocation([
+  const flowPublishInvocation = buildTiangongInvocation([
       'flow',
       'publish-reviewed-data',
       '--flow-rows-file',
@@ -305,7 +323,7 @@ if (publishToDb) {
       ...(flowTargetUserIdArg ? ['--target-user-id', flowTargetUserIdArg] : []),
       commitPublish ? '--commit' : '--dry-run',
       '--json',
-    ], { repoRoot: projectRoot });
+    ], { repoRoot: projectRoot, cliDir: tiangongRuntime.cliDir });
     runFlowPublishCommand(
       commitPublish ? 'stage7:tiangong flow publish commit' : 'stage7:tiangong flow publish dry-run',
       flowPublishInvocation.command,
@@ -339,7 +357,7 @@ if (publishToDb) {
     publishRequestPath,
     commitPublish ? '--commit' : '--dry-run',
     '--json',
-  ], { repoRoot: projectRoot });
+  ], { repoRoot: projectRoot, cliDir: tiangongRuntime.cliDir });
   runCommand(
     commitPublish ? 'stage7:tiangong publish commit' : 'stage7:tiangong publish dry-run',
     publishInvocation.command,

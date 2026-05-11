@@ -54,6 +54,63 @@ function normalizeDerivation(value, fallback) {
   return fallback;
 }
 
+function normalizeText(value) {
+  return String(value || '')
+    .replace(/[^0-9a-zA-Z\u4e00-\u9fff]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+const INPUT_GAS_WORDS = new Set([
+  'air',
+  'argon',
+  'co2',
+  'dioxide',
+  'gas',
+  'gaseous',
+  'hydrogen',
+  'nitrogen',
+  'oxygen',
+]);
+
+function flowLooksLikeGas(flowKey, flow) {
+  const haystack = normalizeText(
+    [
+      flowKey,
+      flow?.name_en,
+      flow?.name,
+      flow?.name_zh,
+      ...(Array.isArray(flow?.aliases) ? flow.aliases : []),
+      flow?.existing_flow_ref?.name,
+    ].join(' '),
+  );
+  const tokens = haystack.split(' ').filter(Boolean);
+  return tokens.some((token) => INPUT_GAS_WORDS.has(token));
+}
+
+function flowLooksLikeEmission(flowKey, flow) {
+  const haystack = normalizeText(
+    [
+      flowKey,
+      flow?.name_en,
+      flow?.name,
+      flow?.name_zh,
+      flow?.existing_flow_ref?.name,
+      flow?.existing_flow_ref?.classification,
+      flow?.existing_flow_ref?.category,
+    ].join(' '),
+  );
+  return (
+    haystack.includes('emission') ||
+    haystack.includes('elementary flow') ||
+    haystack.includes('non agricultural soil') ||
+    haystack.includes('nonagricultural soil') ||
+    haystack.includes('排放') ||
+    haystack.includes('非农业土壤')
+  );
+}
+
 const MISSING_DATA_PREFIX = 'Missing important data:';
 const BLACK_BOX_PREFIX = 'Black-box process.';
 
@@ -93,6 +150,12 @@ for (const proc of plan.processes) {
 
   const validateExchange = (entry, direction) => {
     if (!entry.flow) fail(`process ${proc.key} has an ${direction} without flow`);
+    const flow = plan.flows?.[entry.flow];
+    if (direction === 'input' && flowLooksLikeEmission(entry.flow, flow) && !flowLooksLikeGas(entry.flow, flow)) {
+      fail(
+        `process ${proc.key} input flow=${entry.flow} must not use emission or elementary flow references; use a product flow unless the input is a gas`,
+      );
+    }
     const fallbackDerivation =
       direction === 'output' && entry.flow === proc.reference_output_flow ? 'Measured' : 'Estimated';
     entry.derivation = normalizeDerivation(entry.derivation, fallbackDerivation);

@@ -243,8 +243,8 @@ conversion_factor = MW(anhydrous) / MW(hydrate)
 `materialize-from-plan.mjs` 负责把 `plan.json` 展开为多个工件：
 
 1. 为每个 `flow_key`、process key 和 source 分配 UUID，写入 `uuids.json`。
-2. 如果没有传入 `--flow-scope-file` 且 Supabase 读取环境可用，调用 `tiangong flow list` 生成远程数据库 `flow-scope.json`。
-3. 写 `flow-resolution.json`：原料、基础流、电力、水、氧气、燃料、废物和常见试剂优先复用唯一数据库匹配；专利特定中间产物、复合产物和结果物才新建。
+2. 先检查 `output/patent-to-lifecyclemodel-used-flows.json` 中的极简已用 flow 缓存；只有 exact name + exact unit 且唯一指向一个既有数据库 flow 的情况才可直接复用。若任一 plan flow 没有被 `existing_flow_ref` 或该缓存直接覆盖，必须通过 TianGong CLI 调用 `tiangong flow list` 拉取实时远程数据库，并只写入仓库级 `output/patent-to-lifecyclemodel-flow-scope.json`，各 `output/<SOURCE>/` 不再保存完整远程 rows；凭据从当前环境或相邻 `tiangong-cli/.env` / `TIANGONG_LCA_CLI_DIR/.env` 读取，不允许使用 `--no-remote-flow-scope` 或 `--flow-scope-file` 作为 fallback。多候选自动按 exactness、state code、version、modified time、id 顺序选择最适合项，不再进入人工审查。
+3. 写 `flow-resolution.json`：原料、电力、水、氧气、燃料、废物和常见试剂优先复用唯一数据库匹配；输入侧非气体物质必须优先产品流，不能复用 `排放 > 排放到土壤 > 排放到非农业土壤` 这类排放/elementary flow。只有氧气、氮气、氩气、氢气、空气、CO2 等明确气体输入可使用基础/elementary flow。专利特定中间产物、复合产物和结果物才新建。
 4. 为每个 process 生成 `flows/NN-<proc_key>.json`，作为 `process-automated-builder` 的 scaffold 输入。
 5. 调用 `process-automated-builder auto-build` 建立每个 process 的 scaffold run。
 6. 直接从 plan 写出 `runs/<SOURCE>-combined/exports/processes/<PROC_UUID>_00.00.001.json`。
@@ -256,6 +256,7 @@ ILCD 数据集中的关键映射：
 - `common:UUID` 来自 `uuids.procs[proc.key]`。
 - 每个 exchange 的 `referenceToFlowDataSet.@refObjectId` 来自 `flow-resolution.json`；复用数据库 flow 时是远程 flow UUID，新建时才是 `uuids.flows[flow_key]`。
 - `quantitativeReference.referenceToReferenceFlow` 指向 reference output exchange 的 `@dataSetInternalID`。
+- 若某个 `flow_key` 同时作为上游 Output 和下游 Input，它必须在两个 process 的 exchange 中使用同一个 flow UUID；入库 `json_tg` 中的 node port 也必须有该中间体作为前一 process 的 `OUTPUT:<flowUUID>` 和后一 process 的 `INPUT:<flowUUID>`，edge 的 `source.port` / `target.port` 必须连接到这两个 port。
 - `dataDerivationTypeStatus` 来自 exchange 的 `derivation`。
 - `calc_note`、`formula_ref`、`source_ref`、`source_quote`、`comment` 会合并进 exchange 的 `common:generalComment`。
 
@@ -274,6 +275,13 @@ builder 读取 `runs/<SOURCE>-combined/exports/processes/`。它通过 flow UUID
 - 某个 process 的 Output exchange 引用 flow UUID X；
 - 另一个 process 的 Input exchange 也引用 flow UUID X；
 - 则 X 是两者之间的连接流。
+
+入库前还要检查 lifecyclemodel `json_tg`：
+
+- 节点 `data.label` 必须是 TIDAS 多语言 name 对象（例如 `{ "baseName": [...] }`），不能是纯字符串，否则远程查看模型标题会显示 `-`。
+- 每个 node 必须有唯一的 `ports.items`，覆盖该 process 的 Input 和 Output exchanges；重复引用同一个 flow 时，后续 port 在 `INPUT:<flowUUID>` / `OUTPUT:<flowUUID>` 后追加 exchange internal ID 以保持唯一。
+- 边 `source.port` / `target.port` 必须连接到中间流对应的 output/input port；`labels` / `data.flow` 中保留中间流名称，并记录上游 output exchange 与下游 input exchange 的 internal ID。
+- 参考 process 不新建业务语义字段；使用 TIDAS 已有的 `lifeCycleModelInformation.quantitativeReference.referenceToReferenceProcess`，其值必须指向最终产出目标产品的 `processInstance.@dataSetInternalID`，并投影到远程前端已有的 node `data.quantitativeReference = "1"` 显示字段。
 
 因此，边是否存在取决于 plan 中是否复用同一个 `flow_key`。若中间体在上游叫 `precursor`、下游叫 `ncm_precursor`，即使名称相似也不会形成边。
 

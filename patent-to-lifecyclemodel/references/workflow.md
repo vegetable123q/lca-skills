@@ -20,6 +20,8 @@ Read the source document ONCE and produce `output/<SOURCE>/plan.json` from `asse
 
 **Edge convention:** reuse the same `flow_key` as upstream Output and downstream Input. That is the ONLY thing that produces edges downstream.
 
+**Input flow convention:** process inputs must resolve to product flows whenever the database has a suitable product flow. Do not put emission-side elementary flows on inputs, including categories like `Emissions > Emissions to soil > Emissions to non-agricultural soil`. Elementary/basic flows are allowed on inputs only for explicit gases such as oxygen, nitrogen, argon, hydrogen, air, or CO2.
+
 **Black-box convention:** `black_box: true` is a last-resort semantic fallback, not a topology change. Do not mark a whole patent route black-box because some exchanges are missing; split the route and black-box only the unit operation with the critical data gap. Edges still come only from shared `flow_key`. The generated ILCD dataset will stay structurally valid, but its comments will state that the process is item-based and black-box because critical quantitative inventory data are missing.
 
 Do not re-read the source after `plan.json` is committed. Everything downstream reads only `plan.json`.
@@ -33,12 +35,17 @@ node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --all --json
 ```
 
-The materializer requires a database flow scope by default. When Supabase read env is set, it delegates to
-`tiangong flow list --state-code 0 --state-code 100 --all --page-size 1000 --json`
-and writes `output/<SOURCE>/flow-scope.json` before resolving exchanges. Pass
-`--flow-scope-file <file>` to freeze a reviewed scope. If neither remote env nor
-an explicit scope file is available, the run fails instead of creating every flow
-locally. Use `--no-remote-flow-scope` only for offline tests.
+The materializer requires remote database flow resolution. Before pulling the full remote scope, it
+checks `output/patent-to-lifecyclemodel-used-flows.json`, a minimal direct-reuse cache containing
+only existing database flow `id`, `version`, `name`, `unit`, and exact reusable names from previous
+successful resolutions. A cache hit is valid only for exact name + exact unit and only when it maps
+to one database flow. If any plan flow remains unresolved, the materializer loads credentials from
+the current environment or the adjacent TianGong CLI checkout's `.env` (`tiangong-cli/.env` or
+`TIANGONG_LCA_CLI_DIR/.env`), delegates to
+`tiangong flow list --state-code 0 --state-code 100 --all --page-size 1000 --json`, and writes
+one repo-level `output/patent-to-lifecyclemodel-flow-scope.json` before resolving exchanges. Later
+examples reuse that same repo-level scope; do not write full remote scope rows inside each
+`output/<SOURCE>/`. `--no-remote-flow-scope` and `--flow-scope-file` are forbidden.
 
 What it runs:
 1. `normalize-plan.mjs`
@@ -47,8 +54,10 @@ What it runs:
    - enforces `black_box -> unit:item`
    - rewrites the authored plan in place so later stages read one canonical file
 2. `materialize-from-plan.mjs`
-   - `flow-scope.json` from remote database rows when env is present and no explicit scope file was supplied
-   - `flow-resolution.json`, reusing unique exact existing DB matches by English name, Chinese name, aliases, or `existing_flow_ref`, and listing normalized candidates for AI review
+   - exact direct cache reuse from `output/patent-to-lifecyclemodel-used-flows.json` when every reused name/unit maps to one existing database flow
+   - `output/patent-to-lifecyclemodel-flow-scope.json` from live remote database rows fetched through the TianGong CLI when any plan flow is not directly cached or explicitly referenced
+   - `flow-resolution.json`, automatically reusing the best existing DB match by English name, Chinese name, aliases, normalized names, or `existing_flow_ref`
+   - input-side flow filtering that rejects non-gas elementary/emission candidates and prefers product flows
    - `flows/NN-<proc_key>.json` per process
    - `uuids.json` (one UUID per `flow_key` + one per `proc_key` + one source UUID)
    - `runs/<NN>-<proc_key>/` via `process-automated-builder auto-build`
@@ -70,7 +79,7 @@ cat output/<SOURCE>/orchestrator-run/publish-summary.json
 
 Success: `edge_count == processes-1` (linear chain) or higher (branched), `publish-summary.lifecyclemodel_count >= 1`.
 
-Also inspect `flow-resolution.json`: raw materials, utilities, elementary flows, electricity, water, oxygen, fuels, wastes, and common reagents should reuse existing DB flows where unique exact matches exist. Multiple candidates and normalized candidates such as hydrate/anhydrous name variants are written to `review` with the top candidate rows; AI or human review should decide whether to add `existing_flow_ref` and any required `canonical_flow_key`/`conversion_factor`. Generated flows should be limited to unresolved patent-specific intermediates/results.
+Also inspect `flow-resolution.json`: raw materials, utilities, electricity, water, oxygen, fuels, wastes, and common reagents should reuse existing DB flows where candidates exist. Input-only non-gas materials should use product-flow candidates and must not resolve to emission-side elementary categories. Explicit gas inputs may use elementary/basic flows. Input-only materials should use the nearest compatible database flow when exact matching fails. Multiple candidates and normalized candidates are resolved automatically by exactness, state code, version, modified time, and id order. Nearest input matching remains substance-specific: authored names and aliases are tokenized, process-only modifiers are ignored, common metal symbols such as `Ni`, `Co`, and `Mn` plus Chinese metal names such as `金属镍`/`金属钴`/`金属锰` are normalized to element names, a bare generic `Metal` candidate is rejected when the query names a specific metal, slag/residue/remediation/waste-like rows are rejected for metal feedstock queries, and element-specific product-flow hits such as nickel metal, electrodeposit cobalt, or metallic manganese rank ahead of broad material rows. A flow produced by one patent process and consumed by another in the same plan is an internal patent intermediate and remains generated unless the plan explicitly supplies `existing_flow_ref`. Generated flows should be limited to patent-specific intermediates/results/wastes or rows where no compatible database flow can be found, and publish rows should include only generated flows actually used by process exchanges. The used-flow cache must stay minimal: never store generated flows, unresolved rows, or full remote rows.
 If one process is black-box, inspect the generated process dataset comment and confirm it includes the black-box note.
 
 ### Stage D — Optional database publish

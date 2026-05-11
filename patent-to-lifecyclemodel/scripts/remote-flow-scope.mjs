@@ -1,7 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildTiangongInvocation } from '../../scripts/lib/cli-launcher.mjs';
+import {
+  buildTiangongInvocation,
+  defaultLocalCliDirCandidates,
+  resolveDefaultLocalCliDir,
+} from '../../scripts/lib/cli-launcher.mjs';
 
 const REQUIRED_ENV = [
   'TIANGONG_LCA_API_BASE_URL',
@@ -33,23 +37,97 @@ export function buildRemoteFlowListArgs(options = {}) {
   ];
 }
 
+function normalizeCliDir(cliDir) {
+  const trimmed = typeof cliDir === 'string' ? cliDir.trim() : '';
+  return trimmed ? path.resolve(trimmed) : null;
+}
+
+function parseDotenv(textValue) {
+  const env = {};
+  for (const rawLine of textValue.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/u.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    let value = rawValue.trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
+export function resolveRemoteFlowScopeCliDir(options = {}) {
+  const explicitOptionCliDir = normalizeCliDir(options.cliDir);
+  if (explicitOptionCliDir) return explicitOptionCliDir;
+  const env = options.env ?? process.env;
+  const explicitCliDir = normalizeCliDir(env.TIANGONG_LCA_CLI_DIR);
+  if (explicitCliDir) return explicitCliDir;
+  const pathExists = options.pathExists ?? fs.existsSync;
+  for (const candidate of defaultLocalCliDirCandidates(options.repoRoot)) {
+    if (!pathExists(candidate)) continue;
+    const dotenvPath = path.join(candidate, '.env');
+    if (!fs.existsSync(dotenvPath)) continue;
+    const dotenvEnv = parseDotenv(fs.readFileSync(dotenvPath, 'utf8'));
+    if (hasRemoteFlowScopeEnv(dotenvEnv)) return candidate;
+  }
+  return resolveDefaultLocalCliDir({
+    repoRoot: options.repoRoot,
+    pathExists,
+  });
+}
+
+export function buildRemoteFlowScopeEnv(options = {}) {
+  const baseEnv = { ...(options.env ?? process.env) };
+  const cliDir = resolveRemoteFlowScopeCliDir(options);
+  const dotenvPath = cliDir ? path.join(cliDir, '.env') : null;
+  if (dotenvPath && fs.existsSync(dotenvPath)) {
+    const dotenvEnv = parseDotenv(fs.readFileSync(dotenvPath, 'utf8'));
+    for (const key of REQUIRED_ENV) {
+      if (!nonEmpty(baseEnv[key]) && nonEmpty(dotenvEnv[key])) {
+        baseEnv[key] = dotenvEnv[key];
+      }
+    }
+  }
+  return { env: baseEnv, cliDir, dotenvPath };
+}
+
+export function defaultRemoteFlowScopePath(repoRoot) {
+  return path.join(path.resolve(repoRoot), 'output', 'patent-to-lifecyclemodel-flow-scope.json');
+}
+
 export function ensureRemoteFlowScopeFile(options) {
-  const explicitFlowScopeFile = options?.explicitFlowScopeFile;
-  if (explicitFlowScopeFile) {
-    return path.resolve(explicitFlowScopeFile);
+  if (options?.explicitFlowScopeFile) {
+    throw new Error(
+      'patent-to-lifecyclemodel no longer accepts --flow-scope-file; ' +
+        'materialization must fetch the live remote flow scope through the TianGong CLI.',
+    );
   }
 
-  const env = options?.env ?? process.env;
+  const { env, cliDir, dotenvPath } = buildRemoteFlowScopeEnv(options);
   if (!hasRemoteFlowScopeEnv(env)) {
-    return null;
+    throw new Error(
+      'remote flow scope credentials are required; expected ' +
+        'TIANGONG_LCA_API_BASE_URL, TIANGONG_LCA_API_KEY, and ' +
+        'TIANGONG_LCA_SUPABASE_PUBLISHABLE_KEY in the current environment or in ' +
+        `the TianGong CLI .env${dotenvPath ? ` at ${dotenvPath}` : ''}.`,
+    );
   }
 
-  const base = path.resolve(options?.base);
-  const outPath = path.join(base, 'flow-scope.json');
+  const outPath = options?.flowScopePath
+    ? path.resolve(options.flowScopePath)
+    : defaultRemoteFlowScopePath(options?.repoRoot ?? process.cwd());
+  if (fs.existsSync(outPath)) return outPath;
+
   const tempOutPath = `${outPath}.tmp`;
   const invocation = buildTiangongInvocation(buildRemoteFlowListArgs(options), {
     repoRoot: options?.repoRoot,
-    cliDir: options?.cliDir,
+    cliDir,
     pathExists: options?.pathExists,
   });
   const spawnImpl = options?.spawnImpl ?? spawnSync;
@@ -86,13 +164,5 @@ export function ensureRemoteFlowScopeFile(options) {
 }
 
 export function requireRemoteFlowScopeFile(options) {
-  const result = ensureRemoteFlowScopeFile(options);
-  if (result) return result;
-
-  throw new Error(
-    'remote flow scope is required for patent-to-lifecyclemodel materialization; ' +
-      'set TIANGONG_LCA_API_BASE_URL, TIANGONG_LCA_API_KEY, and ' +
-      'TIANGONG_LCA_SUPABASE_PUBLISHABLE_KEY, pass --flow-scope-file, or pass ' +
-      '--no-remote-flow-scope only for offline tests.',
-  );
+  return ensureRemoteFlowScopeFile(options);
 }
