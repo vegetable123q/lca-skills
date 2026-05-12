@@ -133,6 +133,15 @@ const CHEMICAL_FORM_TOKENS = new Set([
   'sulfate',
 ]);
 
+const STRICT_COUNTERION_FORM_TOKENS = new Set([
+  'carbonate',
+  'chloride',
+  'fluoride',
+  'hydroxide',
+  'nitrate',
+  'sulfate',
+]);
+
 const METAL_ELEMENT_TOKENS = new Set([
   'aluminum',
   'antimony',
@@ -168,6 +177,14 @@ const METAL_ELEMENT_TOKENS = new Set([
   'yttrium',
   'zinc',
   'zirconium',
+]);
+
+const COUNTERION_TOKENS = new Set([
+  ...METAL_ELEMENT_TOKENS,
+  'ammonium',
+  'lithium',
+  'potassium',
+  'sodium',
 ]);
 
 const UNSUITABLE_METAL_INPUT_TOKENS = new Set([
@@ -235,8 +252,35 @@ function nearestTokens(value) {
     .filter((part) => part && !NEAREST_STOPWORDS.has(part));
 }
 
+function nearestTokensWithCounterions(value) {
+  return normalizeText(
+    normalizeChemicalText(value)
+      .replace(/金属镍/gu, 'nickel metal')
+      .replace(/金属钴/gu, 'cobalt metal')
+      .replace(/金属锰/gu, 'manganese metal')
+      .replace(/\baluminium\b/giu, 'aluminum')
+      .replace(/\bmetallic\b/giu, 'metal')
+      .replace(/\bni\b/giu, 'nickel')
+      .replace(/\bco\b/giu, 'cobalt')
+      .replace(/\bmn\b/giu, 'manganese')
+      .replace(/\bmeta\s*phosphate\b/giu, 'phosphate')
+      .replace(/\bmetaphosphate\b/giu, 'phosphate')
+      .replace(/\btetra\s*oxo\s*molybdate\b/giu, 'molybdate')
+      .replace(/\btetraoxomolybdate\b/giu, 'molybdate')
+      .replace(/\bortho\s*molybdate\b/giu, 'molybdate')
+      .replace(/\borthomolybdate\b/giu, 'molybdate'),
+  )
+    .split(' ')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function uniqueTokens(value) {
   return [...new Set(nearestTokens(value))];
+}
+
+function uniqueTokensWithCounterions(value) {
+  return [...new Set(nearestTokensWithCounterions(value))];
 }
 
 function normalizeCandidateText(value) {
@@ -414,6 +458,14 @@ function chemicalFormTokens(tokens) {
   return tokens.filter((token) => CHEMICAL_FORM_TOKENS.has(token));
 }
 
+function strictCounterionForms(tokens) {
+  return tokens.filter((token) => STRICT_COUNTERION_FORM_TOKENS.has(token));
+}
+
+function counterionTokens(tokens) {
+  return tokens.filter((token) => COUNTERION_TOKENS.has(token));
+}
+
 function hasSharedToken(leftTokens, rightTokens) {
   const right = new Set(rightTokens);
   return leftTokens.some((token) => right.has(token));
@@ -492,6 +544,19 @@ function nearestInputMatchScore(recordTokens, queryTokens) {
   }
 
   return null;
+}
+
+function simpleSaltCounterionsCompatible(recordName, queryName) {
+  const recordTokens = uniqueTokensWithCounterions(recordName);
+  const queryTokens = uniqueTokensWithCounterions(queryName);
+  const sharedStrictForms = strictCounterionForms(recordTokens).filter((token) =>
+    strictCounterionForms(queryTokens).includes(token),
+  );
+  if (sharedStrictForms.length === 0) return true;
+  const recordCounterions = counterionTokens(recordTokens);
+  const queryCounterions = counterionTokens(queryTokens);
+  if (recordCounterions.length === 0 || queryCounterions.length === 0) return true;
+  return hasSharedToken(recordCounterions, queryCounterions);
 }
 
 function collapseBestNearestMatchesById(matches) {
@@ -602,15 +667,15 @@ function collapseLatestMatchesById(matches) {
 }
 
 function buildNearestInputMatches(flowNames, sourceUnit, scopeRecords) {
-  const allQueryTokenSets = flowNames
-    .map((name) => new Set(uniqueTokens(name)))
-    .filter((tokens) => tokens.size > 0);
-  const queryHasChemicalForm = allQueryTokenSets.some((tokens) =>
-    chemicalFormTokens([...tokens]).length > 0,
+  const allQueryEntries = flowNames
+    .map((name) => ({ name, tokens: new Set(uniqueTokens(name)) }))
+    .filter((entry) => entry.tokens.size > 0);
+  const queryHasChemicalForm = allQueryEntries.some((entry) =>
+    chemicalFormTokens([...entry.tokens]).length > 0,
   );
-  const queryTokenSets = queryHasChemicalForm
-    ? allQueryTokenSets.filter((tokens) => chemicalFormTokens([...tokens]).length > 0)
-    : allQueryTokenSets;
+  const queryEntries = queryHasChemicalForm
+    ? allQueryEntries.filter((entry) => chemicalFormTokens([...entry.tokens]).length > 0)
+    : allQueryEntries;
   const matches = [];
   for (const record of scopeRecords) {
     if (!isInputCompatibleFlowRecord(record, flowNames)) continue;
@@ -618,7 +683,8 @@ function buildNearestInputMatches(flowNames, sourceUnit, scopeRecords) {
     for (const recordName of record.normalizedNames || [record.normalizedName]) {
       const recordTokens = uniqueTokens(recordName);
       if (recordTokens.length === 0) continue;
-      for (const queryTokens of queryTokenSets) {
+      for (const { name: queryName, tokens: queryTokens } of queryEntries) {
+        if (!simpleSaltCounterionsCompatible(recordName, queryName)) continue;
         const score = nearestInputMatchScore(recordTokens, queryTokens);
         if (score === null) continue;
         matches.push({

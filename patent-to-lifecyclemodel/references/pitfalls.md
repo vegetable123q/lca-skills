@@ -18,6 +18,9 @@ Observed while building `output/CN110980817B/`. Keep this file as a quick troubl
 | 12 | Coated/doped final product stoichiometry is off | Final product is not a single pure phase. | Size reagents on the last uncoated matrix, then mass-balance coating/doping separately. |
 | 13 | Utility values vary without basis | LLM guessed electricity, water, O2, or waste factors. | Call `estimate-utilities.mjs` and copy returned amount plus `formula_ref`/`source_ref` into the exchange. |
 | 14 | EIA replaces patent recipe | Plant-level EIA factors were used as if they were patent unit-operation data. | Patent first, EIA second. Use EIA only as an auxiliary anchor for missing utility/waste quantities on named operations. |
+| 15 | Sodium chloride or another simple salt resolves to a different salt such as lithium chloride | Nearest matching shared the anion token but ignored the counterion/cation. | Treat chloride, sulfate, nitrate, hydroxide, carbonate, and fluoride salts as counterion-sensitive; generate the flow unless an exact compatible DB row or audited `existing_flow_ref` exists. |
+| 16 | A patent-specific solid electrolyte or complex salt resolves to a broad compound row | One element token matched a generic database material, such as `Zirconium-based compound`. | Keep patent-specific complex salts, dopants, solid electrolytes, coated/composite products, and final products generated unless a substance-specific DB row exists. |
+| 17 | Lifecyclemodel publish succeeds but generated flows failed earlier | Flow publishing and lifecyclemodel bundle publishing are separate stages. | Treat the run as failed until `flow-publish-run/publish-report.json` and `publish-run/publish-report.json` both report zero failures. |
 
 Generated folders that are safe to remove for a clean plan-driven rerun:
 

@@ -86,9 +86,12 @@ Regenerate corrected artifacts with the owner skill. For patent routes:
 node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs \
   --plan output/<SOURCE>/plan.json \
   --base output/<SOURCE> \
-  --flow-scope-file output/<SCOPE>/flows.json \
   --all --json
 ```
+
+Current `$patent-to-lifecyclemodel` runs forbid frozen `--flow-scope-file` overrides. The wrapper
+fetches or reuses the repo-level remote scope at `output/patent-to-lifecyclemodel-flow-scope.json`
+so the rerun is compared against the current database flow set.
 
 Then publish:
 

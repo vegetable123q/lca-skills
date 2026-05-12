@@ -281,6 +281,42 @@ test('nearest matching handles unmatched input materials without reusing product
   assert.equal(resolution.flows.ncm811.decision, 'create_new');
 });
 
+test('nearest matching rejects simple salt counterion mismatches', () => {
+  const plan = planWith({
+    flows: {
+      sodium_chloride: { name_en: 'Sodium chloride molten salt', aliases: ['NaCl'], unit: 'kg' },
+    },
+    inputs: [{ flow: 'sodium_chloride', amount: 1 }],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-lithium-chloride', version: '01.01.002', name: 'Lithium chloride' }),
+  ]);
+
+  assert.equal(resolution.flows.sodium_chloride.decision, 'create_new');
+  assert.equal(resolution.flows.sodium_chloride.id, 'new-sodium_chloride');
+});
+
+test('nearest matching keeps patent-specific complex salts from generic compound rows', () => {
+  const plan = planWith({
+    flows: {
+      lithium_zirconium_chloride: {
+        name_en: 'Lithium zirconium chloride solid electrolyte',
+        aliases: ['Li-Zr-Cl solid electrolyte'],
+        unit: 'kg',
+      },
+    },
+    inputs: [{ flow: 'lithium_zirconium_chloride', amount: 1 }],
+  });
+
+  const resolution = resolve(plan, [
+    flowRow({ id: 'db-zirconium-compound', version: '01.01.001', name: 'Zirconium-based compound' }),
+  ]);
+
+  assert.equal(resolution.flows.lithium_zirconium_chloride.decision, 'create_new');
+  assert.equal(resolution.flows.lithium_zirconium_chloride.id, 'new-lithium_zirconium_chloride');
+});
+
 test('specific metal feedstocks do not collapse to generic Metal or waste-like rows', () => {
   const plan = planWith({
     flows: {

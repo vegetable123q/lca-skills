@@ -29,7 +29,7 @@ Use this skill for remote cleanup plans, deletion attempts, and corrected republ
    The CLI should route lifecyclemodels through `delete_lifecycle_model_bundle` and process/flow drafts through `cmd_dataset_delete`.
 4. Preserve identity files. Do not delete `uuids.json` during local cleanup unless the rerun passes the same explicit seed and you have verified IDs remain stable.
 5. Clean only generated run directories before rebuild: `lifecyclemodel-run`, `orchestrator-run`, `publish-run`, `flow-publish-run`, `runs`, `manifests`, `flows`, `processes`, and `artifacts/process_from_flow`.
-6. Regenerate with the owning skill, normally `$patent-to-lifecyclemodel`, and pass a database flow scope so existing flows are reused.
+6. Regenerate with the owning skill, normally `$patent-to-lifecyclemodel`; let that skill fetch or reuse its repo-level remote database flow scope so existing flows are reused.
 7. Verify process-flow references with `tiangong-lca flow scan-process-flow-refs`; every exchange should classify as `exists_in_target`.
 8. Publish through `tiangong-lca flow publish-reviewed-data` and `tiangong-lca publish run`, never through ad hoc remote writes.
 9. After publish, fetch or scan the remote result and report deleted, overwritten, skipped, and blocked rows separately.
