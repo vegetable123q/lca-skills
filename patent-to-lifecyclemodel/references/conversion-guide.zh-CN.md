@@ -17,11 +17,15 @@
 
 第一步是把非结构化文本压缩为 `assets/plan.template.json` 形状：
 
-- `source`：专利号、题名、权利人或申请人。
+- `source`：专利号、题名、权利人或申请人、发明人、优先权/申请/公开/授权日期、最佳年份、司法辖区、Google/PDF 链接、族/引用信号、CPC/IPC、摘要、来源 query/product context 等；没有一等字段映射的 CSV/meta 列放进 `source.extra_metadata`。
 - `goal`：目标产品、功能单位、系统边界。默认功能单位通常为 `1 kg` 目标产品，边界通常为 cradle-to-gate。
 - `geography` 与 `reference_year`：按专利公开或申请上下文填写，缺失时由 `normalize-plan.mjs` 兜底为 `GLO` 和 `unknown`。
-- `flows`：所有原料、中间体、产品、共产品、废水、废气、能源流。
-- `processes[]`：每个单元操作一个 process，包括 `step_id`、名称、分类、技术描述、输入、输出和 `reference_output_flow`。
+- `flows`：所有原料、中间体、产品、共产品、废水、废气、能源流，并填写 `name_en`、可得时的 `name_zh` 和 `unit`。
+- `processes[]`：每个单元操作一个 process，并填齐自动审核需要的字段：`key`、`step_id`、`name_en`、可得时的 `name_zh`、`classification`、`scale`、`technology`、`comment`、`black_box`、`pure_oxygen`、`reference_output_flow`、`inputs`、`outputs`。
+
+`technology` 会写入 ILCD `processInformation.technology.technologyDescriptionAndIncludedProcesses`，对应网页过程信息里的“处理、标准、路线”。这个字段必须放入支撑 LCI 的来源文本和技术参数，不要只写泛化描述。应包含专利/SOP 中的路线顺序、设备或操作、温度、时间、浓度、pH、配比、压力、气氛、流量、产率、洗涤/干燥/煅烧条件，以及采用的标准或工程依据；能定位时写明实施例、段落、表格或步骤编号，并可放入短引用或紧密改写的参数原文。`comment` 用于审核摘要：说明来源、哪些量是实测/计算/估算、缺失数据边界，以及为什么该过程不是黑箱或为什么必须黑箱。
+
+如果输入类似 `data/combined_patents_20250825_true.csv` 的 meta 行加专利全文，CSV/meta 只用于文献信息、筛选/去重信号和来源上下文；技术路线、工艺参数、exchange 数量和推导依据必须回到专利/SOP 全文中抽取。`normalize-plan.mjs` 只能确定性补齐 `step_id`、`name_en`、`scale`、`comment`、被引用 flow 的 `name_en` 和 exchange `source_ref`，不能替 AI 编造 `technology` 中的 LCI 来源文本和技术参数；缺少 `technology` 会直接失败。
 
 每个 exchange 必须标记来源类型：
 
@@ -30,6 +34,8 @@
 | `Measured` | 专利直接给出了该数量。 | 不需要额外字段。 |
 | `Calculated` | 由专利给出的配比、摩尔比、浓度、流量和时间等计算。 | 必须写 `calc_note`，说明公式和数字。 |
 | `Estimated` | 源文本没有可直接使用的数量，使用工程默认值或辅助来源。 | 对电、水、O2、废物/排放，必须写 estimator 的 `formula_ref`，并尽量写 `source_ref`。 |
+
+所有 exchange 都必须填写 `flow`、`amount`、`derivation`。凡是来源文本支撑的 `Measured` 或 `Calculated` 数量，应填写 `source_ref` 或 `source_quote`，让审核能追踪到专利/SOP 中的参数位置或短原文；凡是 `Estimated` 且使用估算器或辅助来源，应填写 `formula_ref` 和 `source_ref`。
 
 黑箱不是默认兜底。只有在已经尝试 `Measured`、`Calculated` 和 `Estimated` 后，仍缺少关键物料、产品或操作数据，导致该单元操作无法形成可辩护清单时，才应设置：
 
@@ -251,6 +257,16 @@ conversion_factor = MW(anhydrous) / MW(hydrate)
 7. 从第一个 scaffold run 复制 `cache/process_from_flow_state.json` 和 `manifests/*.json` 到 `runs/<SOURCE>-combined/`，满足 lifecyclemodel builder 的本地 run 形状要求。
 8. 写 `manifests/lifecyclemodel-manifest.json`，指向单一 source-specific combined run，并在 `basic_info.source` 中预填专利来源信息（公司/assignee、priority/publication/grant 日期、year、reference_year 等）；未显式映射但仍有用的来源字段（如 URL、family members）保留在 `basic_info.source.extra_metadata`，便于后续 CLI manifest 和模型基础信息区分同类专利模型。
 
+Stage 5 生成 lifecyclemodel 后，driver 默认运行：
+
+```bash
+tiangong-lca lifecyclemodel validate-build \
+  --run-dir output/<SOURCE>/lifecyclemodel-run \
+  --engine sdk --json
+```
+
+报告写入 `output/<SOURCE>/lifecyclemodel-run/reports/lifecyclemodel-validate-build-report.json`。该报告必须 `ok: true`，才算满足远程网页“数据校验”的本地入库标准；失败时不要继续 Stage 6 或入库。`--skip-validation` 只用于调试半成品，不用于可接受输出。
+
 ILCD 数据集中的关键映射：
 
 - `common:UUID` 来自 `uuids.procs[proc.key]`。
@@ -282,6 +298,8 @@ builder 读取 `runs/<SOURCE>-combined/exports/processes/`。它通过 flow UUID
 - 每个 node 必须有唯一的 `ports.items`，覆盖该 process 的 Input 和 Output exchanges；重复引用同一个 flow 时，后续 port 在 `INPUT:<flowUUID>` / `OUTPUT:<flowUUID>` 后追加 exchange internal ID 以保持唯一。
 - 边 `source.port` / `target.port` 必须连接到中间流对应的 output/input port；`labels` / `data.flow` 中保留中间流名称，并记录上游 output exchange 与下游 input exchange 的 internal ID。
 - 参考 process 不新建业务语义字段；使用 TIDAS 已有的 `lifeCycleModelInformation.quantitativeReference.referenceToReferenceProcess`，其值必须指向最终产出目标产品的 `processInstance.@dataSetInternalID`，并投影到远程前端已有的 node `data.quantitativeReference = "1"` 显示字段。
+
+入库前还要抽查每个导出的 processDataSet：名称、分类、年份、地理位置、定量参考、技术描述、备注、输入、输出、exchange derivation 和来源说明都不能空；`technologyDescriptionAndIncludedProcesses` 必须含有用于网页“处理、标准、路线”的 LCI 来源文本和技术参数。
 
 因此，边是否存在取决于 plan 中是否复用同一个 `flow_key`。若中间体在上游叫 `precursor`、下游叫 `ncm_precursor`，即使名称相似也不会形成边。
 
@@ -338,6 +356,8 @@ Stage 9 不直接写远端库，而是：
 
 1. 读取 `output/<SOURCE>/orchestrator-run/publish-bundle.json`。
 2. 写 `output/<SOURCE>/publish-request.json`，使用统一 `tiangong publish run` 请求形状。
+
+如果 `output/<SOURCE>/` 已经生成或已经入库，但发现 process 必填项不全，或“处理、标准、路线”缺少 LCI 来源文本/技术参数，应修改同一个 `plan.json`，保留 `uuids.json`，重新运行 driver 生成新的 processDataSet 和 lifecyclemodel payload。确认 `flow-publish-run/publish-report.json` 与 `publish-run/publish-report.json` 均无失败后，再执行 `--publish-only --commit`。稳定 UUID 会让修正后的记录覆盖旧的不完整记录，避免产生重复数据。
 3. 调用最新 TianGong CLI 的 `tiangong publish run`。
 4. 将发布结果写入 `output/<SOURCE>/publish-run/`。
 

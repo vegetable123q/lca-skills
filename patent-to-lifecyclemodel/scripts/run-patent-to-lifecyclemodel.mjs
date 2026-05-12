@@ -46,7 +46,7 @@ const has = (f) => argv.includes(f);
 
 function printHelp() {
   console.log(`Usage:
-  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--json]
+  node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --base <output-dir> [--plan <plan.json>] [--stage5-only|--stage6-only|--all] [--publish-to-db|--publish-only] [--commit] [--skip-validation] [--validation-engine auto|sdk] [--json]
 
 Examples:
   node patent-to-lifecyclemodel/scripts/run-patent-to-lifecyclemodel.mjs --plan output/CN111725499B/plan.json --base output/CN111725499B --all --json
@@ -79,6 +79,8 @@ const publishRetryDelayArg = arg('--publish-retry-delay-seconds');
 const flowTargetUserIdArg = arg('--flow-target-user-id');
 const flowScopeFileArg = arg('--flow-scope-file');
 const noRemoteFlowScope = has('--no-remote-flow-scope');
+const skipValidation = has('--skip-validation');
+const validationEngine = arg('--validation-engine', 'sdk');
 
 if (noRemoteFlowScope) {
   console.error(
@@ -101,6 +103,7 @@ if (commitPublish && !publishToDb) {
 const runLocalStages = !publishOnly;
 const runStage5 = runLocalStages && (stage5Only || (!stage5Only && !stage6Only) || has('--all'));
 const runStage6 = runLocalStages && (stage6Only || (!stage5Only && !stage6Only) || has('--all'));
+const runValidationGate = runLocalStages && !skipValidation && (runStage5 || runStage6);
 const tiangongRuntime = buildRemoteFlowScopeEnv({
   repoRoot: projectRoot,
   env: process.env,
@@ -161,6 +164,14 @@ function run(label, args) {
   return runCommand(label, process.execPath, args);
 }
 
+function runTiangong(label, tiangongArgs) {
+  const invocation = buildTiangongInvocation(tiangongArgs, {
+    repoRoot: projectRoot,
+    cliDir: tiangongRuntime.cliDir,
+  });
+  return runCommand(label, invocation.command, invocation.args);
+}
+
 // ---------- Optional normalize + Stage 1/3/4: plan-driven materialization ----------
 const normalizePlanScript = path.join(skillDir, 'scripts', 'normalize-plan.mjs');
 const materializeScript = path.join(skillDir, 'scripts', 'materialize-from-plan.mjs');
@@ -193,6 +204,29 @@ if (runStage5) {
     'build',
     '--manifest', manifestPath,
     '--out-dir', lifecyclemodelRunDir,
+    '--json',
+  ]);
+}
+
+const lifecyclemodelValidationReportPath = path.join(
+  lifecyclemodelRunDir,
+  'reports',
+  'lifecyclemodel-validate-build-report.json',
+);
+if (runValidationGate) {
+  if (!fs.existsSync(lifecyclemodelRunDir)) {
+    console.error(
+      `run-patent-to-lifecyclemodel: missing ${lifecyclemodelRunDir}; run Stage 5 before validation`,
+    );
+    process.exit(2);
+  }
+  runTiangong('stage5:validate lifecyclemodel build', [
+    'lifecyclemodel',
+    'validate-build',
+    '--run-dir',
+    lifecyclemodelRunDir,
+    '--engine',
+    validationEngine,
     '--json',
   ]);
 }
@@ -369,6 +403,7 @@ if (jsonMode) {
   process.stdout.write(JSON.stringify({
     schema_version: 1, status: 'completed', base,
     lifecyclemodel_run: lifecyclemodelRunDir, orchestrator_run: orchestratorRunDir,
+    lifecyclemodel_validation_report: runValidationGate ? lifecyclemodelValidationReportPath : null,
     publish_request: publishToDb ? publishRequestPath : null,
     publish_run: publishToDb ? publishRunDir : null,
   }) + '\n');

@@ -8,7 +8,17 @@
     "priority_date": "<YYYY-MM-DD if available>",
     "publication_date": "<YYYY-MM-DD if available>",
     "grant_date": "<YYYY-MM-DD if available>",
-    "year": "<preferred patent year if different from publication year>"
+    "year": "<preferred patent year if different from publication year>",
+    "extra_metadata": {
+      "jurisdiction": "<optional from CSV/meta>",
+      "google_patents_url": "<optional>",
+      "pdf_url": "<optional>",
+      "family_id": "<optional>",
+      "cpc": ["<optional>"],
+      "ipc": ["<optional>"],
+      "source_query": "<optional>",
+      "product_context": "<optional>"
+    }
   },
   "goal": {
     "name": "<reference-product name>",
@@ -34,8 +44,8 @@
       "name_zh": "<process name ZH (optional)>",
       "classification": ["Chemicals and chemical products"],
       "scale": "<lab / pilot / industrial>",
-      "technology": "<1-3 sentences, quote source where possible>",
-      "comment": "<general comment, 1-3 sentences>",
+      "technology": "<LCI source text for UI 处理、标准、路线: route, operation/equipment, technical parameters, standards/basis; quote or closely paraphrase the patent/SOP where possible>",
+      "comment": "<audit summary: source, measured/calculated/estimated basis, missing-data limits>",
       "black_box": false,
       "pure_oxygen": false,
       "reference_output_flow": "<flow_key that is the reference product OUT>",
@@ -69,7 +79,12 @@
     "Use the SAME flow_key across processes to create edges (upstream OUTPUT key == downstream INPUT key).",
     "Every process must have exactly one output whose flow equals reference_output_flow; that is the reference exchange.",
     "Amounts are per 1 unit of the process's reference output.",
+    "Fill plan-level fields before materialization: source.id/title/assignee when available, best patent dates/year, goal.name/functional_unit/boundary, geography, reference_year, and every referenced flow name_en/name_zh when available/unit.",
+    "When starting from a patent metadata CSV row plus patent text, put bibliographic/triage metadata in source and source.extra_metadata, but derive technology, amounts, calculation notes, and source_quote/source_ref from the patent/SOP text.",
+    "Fill all review-required process fields: key, step_id, name_en, name_zh when available, classification, scale, technology, comment, black_box, pure_oxygen, reference_output_flow, inputs, and outputs.",
+    "processes[].technology maps to processInformation.technology.technologyDescriptionAndIncludedProcesses, the UI 处理、标准、路线 field. Put the LCI source text and technical parameters there: route sequence, equipment/operation, temperatures, times, concentrations, pH, ratios, pressure, atmosphere, flow rates, yields, washing/drying/calcination conditions, and standards or engineering basis.",
     "derivation=Measured: the source text gives this exact quantity. derivation=Calculated: derived from source-given molar ratios/formulas/recipe fractions — MUST supply calc_note. derivation=Estimated: defaulted from engineering models (electricity/water/O2/waste should come from estimate-utilities.mjs).",
+    "Every exchange must include flow, amount, and derivation. Add source_ref or source_quote for source-supported Measured/Calculated values; add formula_ref and source_ref for Estimated values from an estimator or auxiliary source.",
     "For Estimated electricity/water/O2/waste exchanges, copy the estimator formula_ref and any source_ref into the exchange; materialize-from-plan carries those fields into ILCD generalComment.",
     "Black-box is last resort: set black_box=true only when critical material, product, or operation data needed for a defensible inventory are missing after trying Measured, Calculated, and Estimated derivations. Never mark a whole patent route black-box just because some exchanges are missing.",
     "If a process is black_box=true because critical data are missing, every flow used by that black-box process must use unit=item and every exchange amount must be 1. Downstream processes consuming an item-unit flow inherit that item-based treatment.",

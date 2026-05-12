@@ -11,12 +11,34 @@ Every stage shells out to an existing skill's published script.
 ### Stage A — Parse source (once)
 
 Read the source document ONCE and produce `output/<SOURCE>/plan.json` from `assets/plan.template.json`. Capture:
-- source metadata (id, title, assignee/company, inventor when available, priority/publication/grant dates, best patent year, and extra patent metadata such as URL or family members)
+- source metadata from the patent metadata CSV row and the patent text (id, title, assignee/company, inventor when available, priority/publication/grant dates, best patent year, jurisdiction, Google/PDF URLs, family/citation signals, CPC/IPC, abstract, source query/product context, and other useful meta fields under `source.extra_metadata`)
 - goal (functional unit, boundary)
-- every distinct flow that appears as an input, output, or intermediate
-- one entry in `processes[]` per unit operation, with `inputs`, `outputs`, `reference_output_flow`, `classification`, `technology`, `comment`, `step_id`
+- every distinct flow that appears as an input, output, or intermediate, with `name_en`, `name_zh` when available, and `unit`
+- one entry in `processes[]` per unit operation, with all review-required fields filled: `key`, `step_id`, `name_en`, `name_zh` when available, `classification`, `scale`, `technology`, `comment`, `black_box`, `pure_oxygen`, `reference_output_flow`, `inputs`, and `outputs`
 - keep processes non-black-box when exchanges can be measured, calculated, or estimated from the patent and estimator scripts
 - set `black_box: true` only when critical material, product, or operation data remain missing and the specific unit operation cannot form a defensible inventory
+
+When the input includes a CSV such as `data/combined_patents_20250825_true.csv`, use its row as
+bibliographic and triage metadata only. The CSV can fill source identity, dates, owner, links,
+classification, family/citation, product/query context, and filtering signals. Technical parameters
+for LCI must come from the patent/SOP text; the CSV title/abstract is not enough to author
+`technology`, exchange amounts, or derivation notes.
+
+**Process review fields:** `technology` maps to the ILCD
+`processInformation.technology.technologyDescriptionAndIncludedProcesses` field, which is shown
+in the web UI as "处理、标准、路线". Fill it with the LCI source text that justifies the
+inventory and technical parameters: route sequence, equipment or operation, temperature, duration,
+concentration, pH, ratio, pressure, atmosphere, flow rate, yield, washing/drying/calcination
+conditions, and any standard or engineering basis. Do not write a generic description such as
+"prepared by patent route"; include the source example/section/table and short quoted or closely
+paraphrased parameter text where possible. Use `comment` for the audit summary, missing-data
+limitations, and measured/calculated/estimated basis.
+
+**Exchange review fields:** every input/output must have `flow`, `amount`, and `derivation`.
+`Calculated` exchanges must have `calc_note`; `Estimated` exchanges must have `formula_ref` and
+`source_ref` when an estimator or auxiliary source is used; source-supported `Measured` and
+`Calculated` exchanges should include `source_ref` or `source_quote` so automatic review can trace
+the number.
 
 **Edge convention:** reuse the same `flow_key` as upstream Output and downstream Input. That is the ONLY thing that produces edges downstream.
 
@@ -25,6 +47,9 @@ Read the source document ONCE and produce `output/<SOURCE>/plan.json` from `asse
 **Black-box convention:** `black_box: true` is a last-resort semantic fallback, not a topology change. Do not mark a whole patent route black-box because some exchanges are missing; split the route and black-box only the unit operation with the critical data gap. Edges still come only from shared `flow_key`. The generated ILCD dataset will stay structurally valid, but its comments will state that the process is item-based and black-box because critical quantitative inventory data are missing.
 
 Do not re-read the source after `plan.json` is committed. Everything downstream reads only `plan.json`.
+`normalize-plan.mjs` fills deterministic scaffolding (`step_id`, `name_en`, `scale`, `comment`,
+referenced flow `name_en`, and exchange `source_ref`) but fails when `technology` is empty because
+the code cannot invent the LCI source text needed for "处理、标准、路线".
 
 ### Stage B — One command
 
@@ -65,9 +90,12 @@ What it runs:
    - `runs/<SOURCE>-combined/{cache,manifests}/*` copied from the first scaffold run
    - `manifests/lifecyclemodel-manifest.json`, including `basic_info.source` prefilled from patent metadata and `basic_info.source.extra_metadata` for additional source fields so downstream CLI manifests can distinguish company/year/source variants
 3. `lifecyclemodel-automated-builder build` → `lifecyclemodel-run/…/tidas_bundle/lifecyclemodels/<model_uuid>_<ver>.json`
-4. Driver reads Stage 3 output + normalized `plan.json` + `uuids.json` → writes `orchestrator-request.json`
-5. `lifecyclemodel-recursive-orchestrator` plan → execute → publish → `orchestrator-run/publish-summary.json`
-6. Optional publish execution: driver writes `publish-request.json` from `orchestrator-run/publish-bundle.json` and delegates to `tiangong publish run`.
+4. `tiangong-lca lifecyclemodel validate-build --run-dir <lifecyclemodel-run> --engine sdk --json`
+   - writes `lifecyclemodel-run/reports/lifecyclemodel-validate-build-report.json`
+   - blocks Stage 6 when validation is not OK; this is the local gate for the remote web "数据校验" standard
+5. Driver reads Stage 3 output + normalized `plan.json` + `uuids.json` → writes `orchestrator-request.json`
+6. `lifecyclemodel-recursive-orchestrator` plan → execute → publish → `orchestrator-run/publish-summary.json`
+7. Optional publish execution: driver writes `publish-request.json` from `orchestrator-run/publish-bundle.json` and delegates to `tiangong publish run`.
 
 ### Stage C — Verify
 
@@ -79,7 +107,13 @@ cat output/<SOURCE>/orchestrator-run/publish-summary.json
 
 Success: `edge_count == processes-1` (linear chain) or higher (branched), `publish-summary.lifecyclemodel_count >= 1`.
 
-Also inspect `flow-resolution.json`: raw materials, utilities, electricity, water, oxygen, fuels, wastes, and common reagents should reuse existing DB flows where candidates exist. Input-only non-gas materials should use product-flow candidates and must not resolve to emission-side elementary categories. Explicit gas inputs may use elementary/basic flows. Input-only materials should use the nearest compatible database flow when exact matching fails. Multiple candidates and normalized candidates are resolved automatically by exactness, state code, version, modified time, and id order. Nearest input matching remains substance-specific: authored names and aliases are tokenized, process-only modifiers are ignored, common metal symbols such as `Ni`, `Co`, and `Mn` plus Chinese metal names such as `金属镍`/`金属钴`/`金属锰` are normalized to element names, a bare generic `Metal` candidate is rejected when the query names a specific metal, slag/residue/remediation/waste-like rows are rejected for metal feedstock queries, and element-specific product-flow hits such as nickel metal, electrodeposit cobalt, or metallic manganese rank ahead of broad material rows. Simple salts must preserve the named counterion/cation: do not reuse a chloride, sulfate, nitrate, hydroxide, carbonate, or fluoride row solely because it shares the anion when the query and candidate have different counterions. Patent-specific complex salts, solid electrolytes, dopants, coated/composite products, and final products must not collapse to broad rows such as `Zirconium-based compound` just because one element token overlaps. A flow produced by one patent process and consumed by another in the same plan is an internal patent intermediate and remains generated unless the plan explicitly supplies `existing_flow_ref`. Generated flows should be limited to patent-specific intermediates/results/wastes or rows where no compatible database flow can be found, and publish rows should include only generated flows actually used by process exchanges. The used-flow cache must stay minimal: never store generated flows, unresolved rows, or full remote rows.
+First inspect `lifecyclemodel-run/reports/lifecyclemodel-validate-build-report.json`; it must have
+`ok: true` before accepting the generated process/lifecyclemodel as ready for remote data
+validation. Also inspect exported process datasets and `flow-resolution.json`: each process must have non-empty
+name, classification, reference year, geography, quantitative reference, technology, comments,
+inputs, outputs, and exchange derivation/source notes; `technologyDescriptionAndIncludedProcesses`
+must contain the LCI source text and technical parameters that should appear in the web UI
+"处理、标准、路线" field. Raw materials, utilities, electricity, water, oxygen, fuels, wastes, and common reagents should reuse existing DB flows where candidates exist. Input-only non-gas materials should use product-flow candidates and must not resolve to emission-side elementary categories. Explicit gas inputs may use elementary/basic flows. Input-only materials should use the nearest compatible database flow when exact matching fails. Multiple candidates and normalized candidates are resolved automatically by exactness, state code, version, modified time, and id order. Nearest input matching remains substance-specific: authored names and aliases are tokenized, process-only modifiers are ignored, common metal symbols such as `Ni`, `Co`, and `Mn` plus Chinese metal names such as `金属镍`/`金属钴`/`金属锰` are normalized to element names, a bare generic `Metal` candidate is rejected when the query names a specific metal, slag/residue/remediation/waste-like rows are rejected for metal feedstock queries, and element-specific product-flow hits such as nickel metal, electrodeposit cobalt, or metallic manganese rank ahead of broad material rows. Simple salts must preserve the named counterion/cation: do not reuse a chloride, sulfate, nitrate, hydroxide, carbonate, or fluoride row solely because it shares the anion when the query and candidate have different counterions. Patent-specific complex salts, solid electrolytes, dopants, coated/composite products, and final products must not collapse to broad rows such as `Zirconium-based compound` just because one element token overlaps. A flow produced by one patent process and consumed by another in the same plan is an internal patent intermediate and remains generated unless the plan explicitly supplies `existing_flow_ref`. Generated flows should be limited to patent-specific intermediates/results/wastes or rows where no compatible database flow can be found, and publish rows should include only generated flows actually used by process exchanges. The used-flow cache must stay minimal: never store generated flows, unresolved rows, or full remote rows.
 If one process is black-box, inspect the generated process dataset comment and confirm it includes the black-box note.
 
 ### Stage D — Optional database publish
@@ -106,6 +140,12 @@ Without `--commit`, Stage D creates a dry-run publish request. Stage D never wri
 Accept a committed publish only when both `flow-publish-run/publish-report.json` and
 `publish-run/publish-report.json` report zero failures. A lifecyclemodel publish is not a clean
 result if generated flow publish failed first.
+
+If an already generated `output/<SOURCE>/` is found to have incomplete process fields or missing
+"处理、标准、路线" source text, update `plan.json`, preserve `uuids.json`, rerun the driver from the
+corrected plan so local process datasets and lifecyclemodel payloads are rebuilt, then publish with
+`--publish-only --commit` only after the generated-flow and lifecyclemodel publish reports show zero
+failures. Stable UUIDs allow corrected rows to overwrite the previous incomplete records.
 
 ## Manual path (fallback)
 

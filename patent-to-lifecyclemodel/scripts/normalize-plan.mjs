@@ -62,6 +62,23 @@ function normalizeText(value) {
     .toLowerCase();
 }
 
+function humanizeKey(value) {
+  return String(value || '')
+    .replace(/[_-]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function defaultSourceRef(plan, proc) {
+  return [plan.source?.id, proc.step_id].filter(Boolean).join(' ').trim();
+}
+
+function defaultProcessComment(plan, proc) {
+  const source = plan.source?.id || 'source';
+  const step = proc.step_id ? ` ${proc.step_id}` : '';
+  return `Patent-derived unit process from ${source}${step}; exchange derivation and source notes are recorded on inputs and outputs.`;
+}
+
 const INPUT_GAS_WORDS = new Set([
   'air',
   'argon',
@@ -132,7 +149,10 @@ plan.geography ||= 'GLO';
 
 const referencedFlowKeys = new Set();
 
-for (const proc of plan.processes) {
+for (const [procIndex, proc] of plan.processes.entries()) {
+  if (!proc.key) fail(`process at index ${procIndex} is missing key`);
+  proc.step_id ||= `S${procIndex + 1}`;
+  proc.name_en ||= humanizeKey(proc.key);
   proc.black_box = proc.black_box === true;
   proc.pure_oxygen = proc.pure_oxygen === true;
   proc.inputs = Array.isArray(proc.inputs) ? proc.inputs : [];
@@ -140,9 +160,16 @@ for (const proc of plan.processes) {
   proc.classification = Array.isArray(proc.classification) && proc.classification.length
     ? proc.classification
     : ['Chemicals and chemical products'];
-  proc.comment ||= '';
-  proc.technology ||= '';
-  proc.scale ||= '';
+  proc.comment ||= defaultProcessComment(plan, proc);
+  proc.technology = String(proc.technology || '').trim();
+  proc.scale ||= 'unspecified';
+
+  if (!proc.technology) {
+    fail(
+      `process ${proc.key} is missing technology source text for the UI 处理、标准、路线 field; ` +
+      'fill processes[].technology with LCI source text and technical parameters from the patent/SOP',
+    );
+  }
 
   if (!proc.reference_output_flow) {
     fail(`process ${proc.key || '<unknown>'} is missing reference_output_flow`);
@@ -166,6 +193,10 @@ for (const proc of plan.processes) {
         fail(`process ${proc.key} ${direction} flow=${entry.flow} has derivation=Calculated but no calc_note`);
       }
       entry.calc_note = note;
+    }
+    if (!entry.source_ref && !entry.source_quote) {
+      const sourceRef = defaultSourceRef(plan, proc);
+      if (sourceRef) entry.source_ref = sourceRef;
     }
     referencedFlowKeys.add(entry.flow);
   };
@@ -232,6 +263,7 @@ for (const flowKey of referencedFlowKeys) {
   const flow = plan.flows[flowKey];
   if (!flow) fail(`missing flow definition for ${flowKey}`);
   flow.unit ||= 'kg';
+  flow.name_en ||= humanizeKey(flowKey);
 }
 
 // Rule: canonical_flow_key + conversion_factor. If a flow declares a canonical
