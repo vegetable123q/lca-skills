@@ -39,6 +39,28 @@ test('buildPatentSourceMetadata carries patent company and year fields', () => {
   });
 });
 
+test('buildPatentSourceMetadata flattens source.extra_metadata into lifecyclemodel source metadata', () => {
+  const plan = {
+    source: {
+      id: 'CN112209449A',
+      title: 'NCM811 preparation method',
+      publication_date: '2021-01-12',
+      extra_metadata: {
+        jurisdiction: 'CN',
+        parameter_profile_file: 'output/CN112209449A/patent-parameters.json',
+        patent_parameter_summary: 'claim ranges and embodiment performance',
+      },
+    },
+    reference_year: '2020',
+  };
+
+  assert.deepEqual(buildPatentSourceMetadata(plan).extra_metadata, {
+    jurisdiction: 'CN',
+    parameter_profile_file: 'output/CN112209449A/patent-parameters.json',
+    patent_parameter_summary: 'claim ranges and embodiment performance',
+  });
+});
+
 test('buildPatentLifecyclemodelManifest pre-fills basic patent info for CLI intake', () => {
   const combinedDir = '/workspace/output/CN111725499B/runs/CN111725499B-combined';
   const plan = {

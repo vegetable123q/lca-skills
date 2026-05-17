@@ -55,3 +55,51 @@ test('buildPatentPublishRequest includes canonical process exports for remote pu
 
   assert.deepEqual(request.inputs.processes, [processFile]);
 });
+
+test('writePatentPublishRequest emits patent source dataset for remote validation', async () => {
+  const { writePatentPublishRequest } = await import(
+    '../patent-to-lifecyclemodel/scripts/publish-request.mjs'
+  );
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ptl-publish-request-source-'));
+  fs.writeFileSync(
+    path.join(base, 'plan.json'),
+    `${JSON.stringify(
+      {
+        source: {
+          id: 'CN108123128A',
+          title: 'Surface-layer Al-doped NCM cathode material',
+          assignee: 'Example Battery Co',
+          publication_date: '2018-07-01',
+          extra_metadata: {
+            url: 'https://patents.google.com/patent/CN108123128A/en',
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  fs.writeFileSync(
+    path.join(base, 'uuids.json'),
+    `${JSON.stringify({ srcs: { patent: 'f549fef9-eb86-40a9-846e-2e95854971d1' } }, null, 2)}\n`,
+  );
+
+  const result = writePatentPublishRequest(path.join(base, 'publish-request.json'), base);
+
+  assert.equal(result.request.inputs.sources.length, 1);
+  const sourcePath = result.request.inputs.sources[0];
+  const sourcePayload = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+  const sourceInfo = sourcePayload.sourceDataSet.sourceInformation.dataSetInformation;
+  const admin = sourcePayload.sourceDataSet.administrativeInformation;
+
+  assert.equal(sourceInfo['common:UUID'], 'f549fef9-eb86-40a9-846e-2e95854971d1');
+  assert.match(sourceInfo.sourceCitation, /CN108123128A/u);
+  assert.equal(
+    admin.dataEntryBy['common:referenceToDataSetFormat']['@version'],
+    '03.00.003',
+  );
+  assert.equal(
+    admin.publicationAndOwnership['common:referenceToOwnershipOfDataSet']['@refObjectId'],
+    '1ed5e71c-3ec3-4666-b0fc-9167b60c8056',
+  );
+});

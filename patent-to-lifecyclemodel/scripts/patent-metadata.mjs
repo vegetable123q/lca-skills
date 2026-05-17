@@ -63,11 +63,21 @@ export function buildPatentSourceFromGooglePatentsResult(result, context = {}) {
 
 export function buildPatentSourceMetadata(plan) {
   const source = plan?.source || {};
-  const extraMetadata = compactObject(
+  const looseExtraMetadata = compactObject(
     Object.fromEntries(
-      Object.entries(source).filter(([key]) => !knownSourceKeys.has(key)),
+      Object.entries(source).filter(
+        ([key]) => !knownSourceKeys.has(key) && key !== 'extra_metadata',
+      ),
     ),
   );
+  const nestedExtraMetadata =
+    source.extra_metadata && typeof source.extra_metadata === 'object' && !Array.isArray(source.extra_metadata)
+      ? compactObject(source.extra_metadata)
+      : {};
+  const extraMetadata = compactObject({
+    ...looseExtraMetadata,
+    ...nestedExtraMetadata,
+  });
   const year =
     source.year ||
     source.publication_year ||

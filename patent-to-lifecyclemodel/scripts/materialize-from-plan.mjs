@@ -247,6 +247,39 @@ const flowExport = writePatentFlowExports(base, combinedRunName, plan, uuids, {
 
 const VERSION = '00.00.001';
 const sourceUuid = uuids.srcs.patent;
+const ADMIN_CONTACT = {
+  id: '1ed5e71c-3ec3-4666-b0fc-9167b60c8056',
+  version: '01.01.000',
+  nameEn: 'Wang Boxiang',
+  nameZh: '王博翔',
+};
+
+function localizedText(zh, en) {
+  return [
+    { '@xml:lang': 'zh', '#text': zh },
+    { '@xml:lang': 'en', '#text': en },
+  ];
+}
+
+function adminContactReference() {
+  return {
+    '@refObjectId': ADMIN_CONTACT.id,
+    '@type': 'contact data set',
+    '@uri': `../contacts/${ADMIN_CONTACT.id}_${ADMIN_CONTACT.version}.xml`,
+    '@version': ADMIN_CONTACT.version,
+    'common:shortDescription': localizedText(ADMIN_CONTACT.nameZh, ADMIN_CONTACT.nameEn),
+  };
+}
+
+function patentSourceReference() {
+  return {
+    '@type': 'source data set',
+    '@refObjectId': sourceUuid,
+    '@version': '01.00.000',
+    '@uri': `../sources/${sourceUuid}_01.00.000.xml`,
+    'common:shortDescription': [{ '@xml:lang': 'en', '#text': plan.source?.title || plan.source?.id || '' }],
+  };
+}
 
 function buildIlcd(proc) {
   const procUuid = uuids.procs[proc.key];
@@ -373,25 +406,14 @@ function buildIlcd(proc) {
           deviationsFromLCIMethodApproaches: [{ '@xml:lang': 'en', '#text': blackBox ? 'Black-box process; do not interpret item-based exchanges as mass-balanced inventory.' : 'None' }],
         },
         dataSourcesTreatmentAndRepresentativeness: {
-          referenceToDataSource: [{
-            '@type': 'source data set',
-            '@refObjectId': sourceUuid,
-            '@version': '01.00.000',
-            '@uri': plan.source?.id || '',
-            'common:shortDescription': [{ '@xml:lang': 'en', '#text': plan.source?.title || plan.source?.id || '' }],
-          }],
+          referenceToDataSource: [patentSourceReference()],
         },
       },
       administrativeInformation: {
         dataEntryBy: { 'common:timeStamp': new Date().toISOString() },
         publicationAndOwnership: {
           'common:dataSetVersion': VERSION,
-          'common:referenceToOwnershipOfDataSet': {
-            '@refObjectId': sourceUuid,
-            '@type': 'contact data set',
-            '@version': '01.00.000',
-            'common:shortDescription': [{ '@xml:lang': 'en', '#text': plan.source?.assignee || plan.source?.id || '' }],
-          },
+          'common:referenceToOwnershipOfDataSet': adminContactReference(),
         },
       },
       exchanges: { exchange },

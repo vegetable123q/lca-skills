@@ -32,7 +32,11 @@ import {
   writePatentFlowPublishRowsFile,
 } from './flow-datasets.mjs';
 import { findBuiltLifecyclemodelFile } from './model-files.mjs';
-import { applyPatentPublishMetadataToBundle } from './publish-metadata.mjs';
+import {
+  applyPatentAdministrativeMetadataToJsonFile,
+  applyPatentAdministrativeMetadataToRowsFile,
+  applyPatentPublishMetadataToBundle,
+} from './publish-metadata.mjs';
 import { writePatentPublishRequest } from './publish-request.mjs';
 import { buildRemoteFlowScopeEnv } from './remote-flow-scope.mjs';
 
@@ -342,8 +346,9 @@ if (publishToDb) {
 
   const flowRowsPath = path.join(base, 'flow-publish-rows.json');
   const flowRows = writePatentFlowPublishRowsFile(base, flowRowsPath);
+  applyPatentAdministrativeMetadataToRowsFile(flowRowsPath);
   if (flowRows.rows.length > 0) {
-  const flowPublishInvocation = buildTiangongInvocation([
+    const flowPublishInvocation = buildTiangongInvocation([
       'flow',
       'publish-reviewed-data',
       '--flow-rows-file',
@@ -376,12 +381,15 @@ if (publishToDb) {
     process.exit(2);
   }
 
-  writePatentPublishRequest(publishRequestPath, base, {
+  const publishRequestResult = writePatentPublishRequest(publishRequestPath, base, {
     commit: commitPublish,
     outDir: publishRunDir,
     maxAttempts,
     retryDelaySeconds,
   });
+  for (const processFile of publishRequestResult.request.inputs.processes || []) {
+    applyPatentAdministrativeMetadataToJsonFile(processFile);
+  }
   if (!jsonMode) console.error(`[stage7] wrote ${publishRequestPath}`);
 
   const publishInvocation = buildTiangongInvocation([

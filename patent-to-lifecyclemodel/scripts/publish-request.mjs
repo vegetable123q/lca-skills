@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { buildPatentSourceDataset } from './publish-metadata.mjs';
 
 function listProcessExportFiles(base) {
   const runsDir = path.join(base, 'runs');
@@ -16,6 +17,36 @@ function listProcessExportFiles(base) {
     }
   }
   return files;
+}
+
+function readJsonIfExists(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function writePatentSourceInput(base) {
+  const plan = readJsonIfExists(path.join(base, 'plan.json'));
+  const uuids = readJsonIfExists(path.join(base, 'uuids.json'));
+  const sourceUuid = uuids?.srcs?.patent;
+  if (!plan?.source || typeof sourceUuid !== 'string' || !sourceUuid.trim()) {
+    return null;
+  }
+
+  const sourceDir = path.join(base, 'publish-metadata', 'sources');
+  const sourcePath = path.join(sourceDir, `${sourceUuid}_01.00.000.json`);
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(
+    sourcePath,
+    `${JSON.stringify(
+      buildPatentSourceDataset({
+        source: plan.source,
+        sourceUuid,
+      }),
+      null,
+      2,
+    )}\n`,
+  );
+  return sourcePath;
 }
 
 export function buildPatentPublishRequest(base, options = {}) {
@@ -56,6 +87,10 @@ export function buildPatentPublishRequest(base, options = {}) {
 
 export function writePatentPublishRequest(filePath, base, options = {}) {
   const request = buildPatentPublishRequest(base, options);
+  const sourcePath = writePatentSourceInput(path.resolve(base));
+  if (sourcePath) {
+    request.inputs.sources = [sourcePath, ...(request.inputs.sources || [])];
+  }
   const resolvedPath = path.resolve(filePath);
   fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
   fs.writeFileSync(resolvedPath, `${JSON.stringify(request, null, 2)}\n`);

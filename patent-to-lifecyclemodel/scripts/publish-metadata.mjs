@@ -44,6 +44,605 @@ function compactParts(parts) {
   return parts.filter((part) => typeof part === 'string' && part.trim()).map((part) => part.trim());
 }
 
+function langText(entries, lang) {
+  return listify(entries)
+    .filter(isRecord)
+    .find((entry) => entry['@xml:lang'] === lang && text(entry))?.['#text'];
+}
+
+function localizedText(zh, en) {
+  return [
+    { '@xml:lang': 'zh', '#text': zh },
+    { '@xml:lang': 'en', '#text': en },
+  ];
+}
+
+const ADMIN_CONTACT = {
+  id: '1ed5e71c-3ec3-4666-b0fc-9167b60c8056',
+  version: '01.01.000',
+  nameEn: 'Wang Boxiang',
+  nameZh: '王博翔',
+};
+
+const DATA_FORMAT_REFERENCE = {
+  '@refObjectId': 'a97a0155-0234-4b87-b4ce-a45da52f2a40',
+  '@type': 'source data set',
+  '@uri': '../sources/a97a0155-0234-4b87-b4ce-a45da52f2a40_03.00.003.xml',
+  '@version': '03.00.003',
+  'common:shortDescription': localizedText('ILCD 格式', 'ILCD format'),
+};
+
+const COMPLIANCE_REFERENCE = {
+  '@refObjectId': 'd92a1a12-2545-49e2-a585-55c259997756',
+  '@type': 'source data set',
+  '@uri': '../sources/d92a1a12-2545-49e2-a585-55c259997756_20.20.002.xml',
+  '@version': '20.20.002',
+  'common:shortDescription': localizedText('ILCD 数据网络入门级', 'ILCD Data Network - Entry-level'),
+};
+
+function referencesMatch(actual, expected) {
+  if (!isRecord(actual)) return false;
+  return ['@refObjectId', '@type', '@uri', '@version'].every((key) => text(actual[key]) === text(expected[key]));
+}
+
+function setReference(target, key, expected) {
+  if (referencesMatch(target[key], expected)) return false;
+  target[key] = clone(expected);
+  return true;
+}
+
+function adminContactReference() {
+  return {
+    '@refObjectId': ADMIN_CONTACT.id,
+    '@type': 'contact data set',
+    '@uri': `../contacts/${ADMIN_CONTACT.id}_${ADMIN_CONTACT.version}.xml`,
+    '@version': ADMIN_CONTACT.version,
+    'common:shortDescription': localizedText(ADMIN_CONTACT.nameZh, ADMIN_CONTACT.nameEn),
+  };
+}
+
+function sourceClassification(classId, label) {
+  return {
+    'common:classification': {
+      'common:class': {
+        '@level': '0',
+        '@classId': classId,
+        '#text': label,
+      },
+    },
+  };
+}
+
+function validUri(value) {
+  const candidate = text(value);
+  if (!candidate) return null;
+  try {
+    return new URL(candidate).toString();
+  } catch {
+    return null;
+  }
+}
+
+export function buildPatentSourceDataset({ source = {}, sourceUuid, now = new Date() } = {}) {
+  const id = text(sourceUuid);
+  if (!id) {
+    throw new Error('buildPatentSourceDataset requires sourceUuid');
+  }
+  const sourceId = text(source.id) || text(source.source_id) || id;
+  const title = text(source.title) || sourceId;
+  const citation = compactParts([
+    sourceId,
+    title,
+    source.assignee ? `assignee: ${text(source.assignee)}` : '',
+    source.publication_date ? `publication: ${text(source.publication_date)}` : '',
+    source.priority_date ? `priority: ${text(source.priority_date)}` : '',
+  ]).join('; ');
+  const digitalUri =
+    validUri(source.url) ||
+    validUri(source.google_patents_url) ||
+    validUri(source.pdf_url) ||
+    validUri(source.extra_metadata?.url);
+
+  return {
+    sourceDataSet: {
+      '@xmlns:common': 'http://lca.jrc.it/ILCD/Common',
+      '@xmlns': 'http://lca.jrc.it/ILCD/Source',
+      '@xmlns:xsi': 'http://www.w3.org/2001/XMLSchema-instance',
+      '@version': '1.1',
+      '@xsi:schemaLocation': 'http://lca.jrc.it/ILCD/Source ../../schemas/ILCD_SourceDataSet.xsd',
+      sourceInformation: {
+        dataSetInformation: {
+          'common:UUID': id,
+          'common:shortName': localizedText(sourceId, title),
+          classificationInformation: sourceClassification('patent', 'Patent source'),
+          sourceCitation: citation || sourceId,
+          publicationType: 'Other unpublished and grey literature',
+          sourceDescriptionOrComment: localizedText(
+            `专利来源：${sourceId}。${title}`,
+            `Patent source: ${sourceId}. ${title}`,
+          ),
+          ...(digitalUri ? { referenceToDigitalFile: { '@uri': digitalUri } } : {}),
+        },
+      },
+      administrativeInformation: {
+        dataEntryBy: {
+          'common:timeStamp': now.toISOString(),
+          'common:referenceToDataSetFormat': clone(DATA_FORMAT_REFERENCE),
+        },
+        publicationAndOwnership: {
+          'common:dataSetVersion': '01.00.000',
+          'common:permanentDataSetURI': `urn:uuid:${id}`,
+          'common:referenceToOwnershipOfDataSet': adminContactReference(),
+        },
+      },
+    },
+  };
+}
+
+function ensureLocalizedField(target, key, zh, en) {
+  if (text(target[key])) return false;
+  target[key] = localizedText(zh, en);
+  return true;
+}
+
+function isWeakLifecyclemodelMixAndLocation(value) {
+  const entries = listify(value);
+  if (entries.length === 0) return true;
+  const values = entries.map((entry) => text(entry).toLowerCase()).filter(Boolean);
+  if (values.length === 0) return true;
+  return values.every((entry) => ['lab', 'laboratory', 'pilot', 'industrial'].includes(entry));
+}
+
+function ensurePatentProcessNameFields(processDataset) {
+  const processInformation = isRecord(processDataset.processInformation)
+    ? processDataset.processInformation
+    : {};
+  processDataset.processInformation = processInformation;
+  const dataSetInformation = isRecord(processInformation.dataSetInformation)
+    ? processInformation.dataSetInformation
+    : {};
+  processInformation.dataSetInformation = dataSetInformation;
+  const name = isRecord(dataSetInformation.name) ? dataSetInformation.name : {};
+  dataSetInformation.name = name;
+
+  let changed = false;
+  changed =
+    ensureLocalizedField(name, 'treatmentStandardsRoutes', '基于专利的工艺路线', 'Patent-derived process route') ||
+    changed;
+
+  const geography = text(processInformation.geography?.locationOfOperationSupplyOrProduction?.['@location']);
+  const existingMix = text(name.mixAndLocationTypes);
+  if (isWeakLifecyclemodelMixAndLocation(name.mixAndLocationTypes)) {
+    const mixZh = compactParts([geography, existingMix, '专利工艺']).join('；') || '专利工艺';
+    const mixEn = compactParts([geography, existingMix, 'patent-derived process']).join('; ') || 'patent-derived process';
+    name.mixAndLocationTypes = localizedText(mixZh, mixEn);
+    changed = true;
+  }
+
+  if (!text(name.functionalUnitFlowProperties)) {
+    const referenceFlowId = text(processInformation.quantitativeReference?.referenceToReferenceFlow);
+    const exchanges = listify(processDataset.exchanges?.exchange).filter(isRecord);
+    const referenceExchange =
+      exchanges.find((entry) => text(entry['@dataSetInternalID']) === referenceFlowId) ||
+      exchanges.find((entry) => entry.quantitativeReference === true || text(entry.quantitativeReference) === '1') ||
+      exchanges.find((entry) => text(entry.exchangeDirection).toLowerCase() === 'output') ||
+      null;
+    const referenceFlow = text(referenceExchange?.referenceToFlowDataSet?.['common:shortDescription']);
+    const unit = text(referenceExchange?.referenceUnit);
+    const flowText = referenceFlow || text(name.baseName) || 'reference output';
+    name.functionalUnitFlowProperties = localizedText(
+      `参考流：${flowText}`,
+      compactParts(['Reference flow', flowText, unit ? `unit ${unit}` : '']).join('; '),
+    );
+    changed = true;
+  }
+
+  return changed;
+}
+
+function ensureFourLevelClassification(processDataset) {
+  const dataSetInformation = processDataset.processInformation?.dataSetInformation;
+  if (!isRecord(dataSetInformation)) return false;
+  const classificationInformation = isRecord(dataSetInformation.classificationInformation)
+    ? dataSetInformation.classificationInformation
+    : {};
+  dataSetInformation.classificationInformation = classificationInformation;
+  const classification = isRecord(classificationInformation['common:classification'])
+    ? classificationInformation['common:classification']
+    : {};
+  classificationInformation['common:classification'] = classification;
+
+  const existing = listify(classification['common:class']).filter(isRecord);
+  const defaults = [
+    'Materials production',
+    'Battery materials',
+    'Patent-derived process',
+    'Patent-derived process',
+  ];
+  let changed = false;
+  const classes = Array.from({ length: 4 }, (_, index) => {
+    const prior = existing[index] || {};
+    const label = text(prior) || defaults[index];
+    const classId = text(prior['@classId']) || `patent-process-${index}`;
+    if (!text(prior['@classId']) || text(prior['@level']) !== String(index) || !text(prior)) {
+      changed = true;
+    }
+    return {
+      ...prior,
+      '@level': String(index),
+      '@classId': classId,
+      '#text': label,
+    };
+  });
+  if (existing.length !== 4) changed = true;
+  classification['common:class'] = classes;
+  return changed;
+}
+
+function normalizeYear(value, fallback) {
+  const numberValue = Number.parseInt(text(value), 10);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : fallback;
+}
+
+function stableClassId(value, fallback) {
+  const normalized = text(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '');
+  return normalized || fallback;
+}
+
+function ensurePatentProcessSchemaFields(processDataset) {
+  let changed = false;
+  const nowYear = new Date().getUTCFullYear();
+
+  const requiredRootAttributes = {
+    '@xmlns:common': 'http://lca.jrc.it/ILCD/Common',
+    '@xmlns': 'http://lca.jrc.it/ILCD/Process',
+    '@xmlns:xsi': 'http://www.w3.org/2001/XMLSchema-instance',
+    '@version': '1.1',
+    '@locations': '../ILCDLocations.xml',
+    '@xsi:schemaLocation': 'http://lca.jrc.it/ILCD/Process ../schemas/ILCD_ProcessDataSet.xsd',
+  };
+  for (const [key, value] of Object.entries(requiredRootAttributes)) {
+    if (processDataset[key] !== value) {
+      processDataset[key] = value;
+      changed = true;
+    }
+  }
+
+  changed = ensureFourLevelClassification(processDataset) || changed;
+
+  const processInformation = isRecord(processDataset.processInformation)
+    ? processDataset.processInformation
+    : {};
+  processDataset.processInformation = processInformation;
+  const timeInfo = isRecord(processInformation.time) ? processInformation.time : {};
+  processInformation.time = timeInfo;
+  const referenceYear = normalizeYear(timeInfo['common:referenceYear'], nowYear);
+  const validUntil = normalizeYear(timeInfo['common:dataSetValidUntil'], Math.max(referenceYear, 2030));
+  if (timeInfo['common:referenceYear'] !== referenceYear) {
+    timeInfo['common:referenceYear'] = referenceYear;
+    changed = true;
+  }
+  if (timeInfo['common:dataSetValidUntil'] !== validUntil) {
+    timeInfo['common:dataSetValidUntil'] = validUntil;
+    changed = true;
+  }
+
+  const modellingAndValidation = isRecord(processDataset.modellingAndValidation)
+    ? processDataset.modellingAndValidation
+    : {};
+  processDataset.modellingAndValidation = modellingAndValidation;
+  const method = isRecord(modellingAndValidation.LCIMethodAndAllocation)
+    ? modellingAndValidation.LCIMethodAndAllocation
+    : {};
+  modellingAndValidation.LCIMethodAndAllocation = method;
+  if (Array.isArray(method.LCIMethodApproaches)) {
+    method.LCIMethodApproaches = text(method.LCIMethodApproaches) || 'Allocation - mass';
+    changed = true;
+  }
+  const representativeness = isRecord(
+    modellingAndValidation.dataSourcesTreatmentAndRepresentativeness,
+  )
+    ? modellingAndValidation.dataSourcesTreatmentAndRepresentativeness
+    : {};
+  modellingAndValidation.dataSourcesTreatmentAndRepresentativeness = representativeness;
+  changed =
+    ensureLocalizedField(
+      representativeness,
+      'dataCutOffAndCompletenessPrinciples',
+      '基于专利公开文本和可获得技术参数建模；未披露参数按保守默认值补齐。',
+      'Modelled from patent disclosure and available technical parameters; undisclosed parameters are filled with conservative defaults.',
+    ) || changed;
+  if (!isRecord(modellingAndValidation.validation)) {
+    modellingAndValidation.validation = { review: { '@type': 'Not reviewed' } };
+    changed = true;
+  } else if (!isRecord(modellingAndValidation.validation.review)) {
+    modellingAndValidation.validation.review = { '@type': 'Not reviewed' };
+    changed = true;
+  } else if (text(modellingAndValidation.validation.review['@type']) !== 'Not reviewed') {
+    modellingAndValidation.validation.review['@type'] = 'Not reviewed';
+    changed = true;
+  }
+  const compliance = {
+    'common:referenceToComplianceSystem': clone(COMPLIANCE_REFERENCE),
+    'common:approvalOfOverallCompliance': 'Not defined',
+    'common:nomenclatureCompliance': 'Not defined',
+    'common:methodologicalCompliance': 'Not defined',
+    'common:reviewCompliance': 'Not defined',
+    'common:documentationCompliance': 'Not defined',
+    'common:qualityCompliance': 'Not defined',
+  };
+  if (!isRecord(modellingAndValidation.complianceDeclarations)) {
+    modellingAndValidation.complianceDeclarations = { compliance };
+    changed = true;
+  } else if (!isRecord(modellingAndValidation.complianceDeclarations.compliance)) {
+    modellingAndValidation.complianceDeclarations.compliance = compliance;
+    changed = true;
+  } else {
+    for (const [key, value] of Object.entries(compliance)) {
+      if (key === 'common:referenceToComplianceSystem') {
+        changed = setReference(modellingAndValidation.complianceDeclarations.compliance, key, value) || changed;
+      } else if (!text(modellingAndValidation.complianceDeclarations.compliance[key])) {
+        modellingAndValidation.complianceDeclarations.compliance[key] = clone(value);
+        changed = true;
+      }
+    }
+  }
+
+  const administrativeInformation = isRecord(processDataset.administrativeInformation)
+    ? processDataset.administrativeInformation
+    : {};
+  processDataset.administrativeInformation = administrativeInformation;
+  const dataEntryBy = isRecord(administrativeInformation.dataEntryBy)
+    ? administrativeInformation.dataEntryBy
+    : {};
+  administrativeInformation.dataEntryBy = dataEntryBy;
+  changed = setReference(dataEntryBy, 'common:referenceToDataSetFormat', DATA_FORMAT_REFERENCE) || changed;
+  const publicationAndOwnership = isRecord(administrativeInformation.publicationAndOwnership)
+    ? administrativeInformation.publicationAndOwnership
+    : {};
+  administrativeInformation.publicationAndOwnership = publicationAndOwnership;
+  const processId = text(processDataset.processInformation?.dataSetInformation?.['common:UUID']);
+  if (!text(publicationAndOwnership['common:permanentDataSetURI']) && processId) {
+    publicationAndOwnership['common:permanentDataSetURI'] = `urn:uuid:${processId}`;
+    changed = true;
+  }
+  if (!text(publicationAndOwnership['common:copyright'])) {
+    publicationAndOwnership['common:copyright'] = 'false';
+    changed = true;
+  }
+
+  for (const exchange of listify(processDataset.exchanges?.exchange).filter(isRecord)) {
+    const flowReference = isRecord(exchange.referenceToFlowDataSet)
+      ? exchange.referenceToFlowDataSet
+      : {};
+    exchange.referenceToFlowDataSet = flowReference;
+    const flowId = text(flowReference['@refObjectId']);
+    const flowVersion = text(flowReference['@version']) || '00.00.001';
+    if (flowId && !text(flowReference['@uri'])) {
+      flowReference['@uri'] = `../flows/${flowId}_${flowVersion}.xml`;
+      changed = true;
+    }
+    for (const key of ['meanAmount', 'resultingAmount', 'minimumAmount', 'maximumAmount']) {
+      if (typeof exchange[key] === 'number') {
+        exchange[key] = String(exchange[key]);
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
+function ensurePatentFlowNameFields(flowDataset) {
+  const flowInformation = isRecord(flowDataset.flowInformation) ? flowDataset.flowInformation : {};
+  flowDataset.flowInformation = flowInformation;
+  const dataSetInformation = isRecord(flowInformation.dataSetInformation)
+    ? flowInformation.dataSetInformation
+    : {};
+  flowInformation.dataSetInformation = dataSetInformation;
+  const name = isRecord(dataSetInformation.name) ? dataSetInformation.name : {};
+  dataSetInformation.name = name;
+
+  let changed = false;
+  changed =
+    ensureLocalizedField(name, 'treatmentStandardsRoutes', '基于专利的流数据', 'Patent-derived flow dataset') ||
+    changed;
+  if (isWeakLifecyclemodelMixAndLocation(name.mixAndLocationTypes)) {
+    name.mixAndLocationTypes = localizedText('专利派生流', 'patent-derived flow');
+    changed = true;
+  }
+
+  const classificationInformation = isRecord(dataSetInformation.classificationInformation)
+    ? dataSetInformation.classificationInformation
+    : {};
+  dataSetInformation.classificationInformation = classificationInformation;
+  const classification = isRecord(classificationInformation['common:classification'])
+    ? classificationInformation['common:classification']
+    : {};
+  classificationInformation['common:classification'] = classification;
+  const existingClasses = listify(classification['common:class']).filter(isRecord);
+  const classes = existingClasses.length
+    ? existingClasses
+    : [
+        { '@level': '0', '#text': 'Patent-derived flows' },
+        { '@level': '1', '#text': 'Patent-based lifecycle modeling' },
+      ];
+  for (const [index, entry] of classes.entries()) {
+    if (!text(entry['@level'])) {
+      entry['@level'] = String(index);
+      changed = true;
+    }
+    if (!text(entry['@classId'])) {
+      entry['@classId'] = stableClassId(entry['#text'], `patent-flow-${index}`);
+      changed = true;
+    }
+  }
+  classification['common:class'] = classes;
+
+  return changed;
+}
+
+function ensurePatentLifecyclemodelNameFields(dataSetInformation, manifest) {
+  const name = isRecord(dataSetInformation.name) ? dataSetInformation.name : {};
+  dataSetInformation.name = name;
+  let changed = false;
+
+  changed =
+    ensureLocalizedField(
+      name,
+      'treatmentStandardsRoutes',
+      '基于专利的生命周期建模路线',
+      'Patent-based lifecycle modeling route',
+    ) || changed;
+
+  const geography = text(manifest?.basic_info?.geography) || text(manifest?.basic_info?.source?.jurisdiction);
+  const boundary = text(manifest?.basic_info?.boundary) || text(manifest?.goal?.boundary);
+  const mixZh = compactParts([geography, boundary, '专利路线']).join('；') || '专利路线';
+  const mixEn = compactParts([geography, boundary, 'patent-derived route']).join('; ') || 'patent-derived route';
+  if (isWeakLifecyclemodelMixAndLocation(name.mixAndLocationTypes)) {
+    name.mixAndLocationTypes = localizedText(mixZh, mixEn);
+    changed = true;
+  }
+
+  return changed;
+}
+
+function ensurePatentIntendedApplications(model) {
+  const administrativeInformation = isRecord(model.administrativeInformation)
+    ? model.administrativeInformation
+    : {};
+  model.administrativeInformation = administrativeInformation;
+
+  const commissionerAndGoal = isRecord(administrativeInformation['common:commissionerAndGoal'])
+    ? administrativeInformation['common:commissionerAndGoal']
+    : {};
+  administrativeInformation['common:commissionerAndGoal'] = commissionerAndGoal;
+
+  if (text(commissionerAndGoal['common:intendedApplications'])) return false;
+  commissionerAndGoal['common:intendedApplications'] = localizedText(
+    '基于专利的生命周期建模',
+    'Patent-based lifecycle modeling',
+  );
+  return true;
+}
+
+function normalizeReviewContact(datasetRoot, contact) {
+  const review = datasetRoot.modellingAndValidation?.validation?.review;
+  if (!isRecord(review) || !isRecord(review['common:referenceToNameOfReviewerAndInstitution'])) {
+    return false;
+  }
+  review['common:referenceToNameOfReviewerAndInstitution'] = clone(contact);
+  return true;
+}
+
+export function applyPatentAdministrativeMetadataToDataset(payload, options = {}) {
+  const datasetRoot =
+    (isRecord(payload?.lifeCycleModelDataSet) && payload.lifeCycleModelDataSet) ||
+    (isRecord(payload?.processDataSet) && payload.processDataSet) ||
+    (isRecord(payload?.flowDataSet) && payload.flowDataSet) ||
+    payload;
+  if (!isRecord(datasetRoot)) return false;
+
+  const administrativeInformation = isRecord(datasetRoot.administrativeInformation)
+    ? datasetRoot.administrativeInformation
+    : {};
+  datasetRoot.administrativeInformation = administrativeInformation;
+
+  let changed = false;
+  const contact = adminContactReference();
+
+  const commissionerAndGoal = isRecord(administrativeInformation['common:commissionerAndGoal'])
+    ? administrativeInformation['common:commissionerAndGoal']
+    : {};
+  administrativeInformation['common:commissionerAndGoal'] = commissionerAndGoal;
+  commissionerAndGoal['common:referenceToCommissioner'] = clone(contact);
+  changed = true;
+  if (options.commissioner !== false) {
+    changed = ensurePatentIntendedApplications(datasetRoot) || changed;
+  }
+
+  const dataEntryBy = isRecord(administrativeInformation.dataEntryBy)
+    ? administrativeInformation.dataEntryBy
+    : {};
+  administrativeInformation.dataEntryBy = dataEntryBy;
+  dataEntryBy['common:referenceToPersonOrEntityEnteringTheData'] = clone(contact);
+  changed = setReference(dataEntryBy, 'common:referenceToDataSetFormat', DATA_FORMAT_REFERENCE) || changed;
+  changed = true;
+
+  const dataGenerator = isRecord(administrativeInformation.dataGenerator)
+    ? administrativeInformation.dataGenerator
+    : {};
+  administrativeInformation.dataGenerator = dataGenerator;
+  dataGenerator['common:referenceToPersonOrEntityGeneratingTheDataSet'] = clone(contact);
+  changed = true;
+
+  const publicationAndOwnership = isRecord(administrativeInformation.publicationAndOwnership)
+    ? administrativeInformation.publicationAndOwnership
+    : {};
+  administrativeInformation.publicationAndOwnership = publicationAndOwnership;
+  publicationAndOwnership['common:referenceToOwnershipOfDataSet'] = clone(contact);
+  publicationAndOwnership['common:licenseType'] = 'Other';
+  changed = true;
+  changed = normalizeReviewContact(datasetRoot, contact) || changed;
+
+  if (datasetRoot === payload?.processDataSet || isRecord(datasetRoot.processInformation)) {
+    changed = ensurePatentProcessNameFields(datasetRoot) || changed;
+    changed = ensurePatentProcessSchemaFields(datasetRoot) || changed;
+  }
+  if (datasetRoot === payload?.flowDataSet || isRecord(datasetRoot.flowInformation)) {
+    changed = ensurePatentFlowNameFields(datasetRoot) || changed;
+  }
+
+  return changed;
+}
+
+export function applyPatentAdministrativeMetadataToJsonFile(filePath, options = {}) {
+  const resolved = path.resolve(filePath);
+  const payload = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  const changed = applyPatentAdministrativeMetadataToDataset(payload, options);
+  if (changed) fs.writeFileSync(resolved, `${JSON.stringify(payload, null, 2)}\n`);
+  return { path: resolved, changed };
+}
+
+export function applyPatentAdministrativeMetadataToRowsFile(filePath, options = {}) {
+  const resolved = path.resolve(filePath);
+  const rows = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  let changed = false;
+  for (const row of listify(rows).filter(isRecord)) {
+    if (isRecord(row.json_ordered)) {
+      changed = applyPatentAdministrativeMetadataToDataset(row.json_ordered, options) || changed;
+    }
+    if (isRecord(row.json)) {
+      changed = applyPatentAdministrativeMetadataToDataset(row.json, options) || changed;
+    }
+  }
+  if (changed) fs.writeFileSync(resolved, `${JSON.stringify(rows, null, 2)}\n`);
+  return { path: resolved, changed };
+}
+
+function ensurePatentUseAdvice(model) {
+  const modellingAndValidation = isRecord(model.modellingAndValidation)
+    ? model.modellingAndValidation
+    : {};
+  model.modellingAndValidation = modellingAndValidation;
+
+  const dataSourcesTreatmentEtc = isRecord(modellingAndValidation.dataSourcesTreatmentEtc)
+    ? modellingAndValidation.dataSourcesTreatmentEtc
+    : {};
+  modellingAndValidation.dataSourcesTreatmentEtc = dataSourcesTreatmentEtc;
+
+  const expected = '基于专利的生命周期建模';
+  if (langText(dataSourcesTreatmentEtc.useAdviceForDataSet, 'zh') === expected) return false;
+  dataSourcesTreatmentEtc.useAdviceForDataSet = localizedText(
+    expected,
+    'Patent-based lifecycle modeling',
+  );
+  return true;
+}
+
 function patentSourceSummary(source) {
   if (!isRecord(source)) return '';
   return compactParts([
@@ -85,16 +684,24 @@ function appendUniqueGeneralComment(target, comment) {
 function applyPatentBasicInfoToLifecyclemodelPayload(payload, manifest) {
   if (!isRecord(manifest?.basic_info)) return false;
   const model = root(payload);
+  let changed = applyPatentAdministrativeMetadataToDataset(model);
   const info = model.lifeCycleModelInformation || {};
   model.lifeCycleModelInformation = info;
   const dataSetInformation = info.dataSetInformation || {};
   info.dataSetInformation = dataSetInformation;
-  let changed = appendUniqueGeneralComment(dataSetInformation, patentSourceComment(manifest));
+  changed = appendUniqueGeneralComment(dataSetInformation, patentSourceComment(manifest)) || changed;
   const modelName = text(manifest.basic_info.name);
   if (modelName) {
-    dataSetInformation.name = { baseName: [{ '@xml:lang': 'en', '#text': modelName }] };
+    const existingName = isRecord(dataSetInformation.name) ? dataSetInformation.name : {};
+    dataSetInformation.name = {
+      ...existingName,
+      baseName: [{ '@xml:lang': 'en', '#text': modelName }],
+    };
     changed = true;
   }
+  changed = ensurePatentLifecyclemodelNameFields(dataSetInformation, manifest) || changed;
+  changed = ensurePatentIntendedApplications(model) || changed;
+  changed = ensurePatentUseAdvice(model) || changed;
   if (manifest.basic_info.reference_year && !text(dataSetInformation.referenceYear)) {
     dataSetInformation.referenceYear = String(manifest.basic_info.reference_year);
     changed = true;
@@ -565,6 +1172,15 @@ export function applyPatentPublishMetadataToBundle(bundlePath) {
     }
     entry.json_ordered = payload;
     entry.json_tg = buildPatentLifecyclemodelJsonTgWithOptions(payload, { processPayloads });
+    changed = true;
+  }
+  for (const entry of listify(bundle.projected_processes).filter(isRecord)) {
+    const payload = loadLifecyclemodelPayload(entry, bundleDir);
+    if (!payload) continue;
+    delete entry.file;
+    delete entry.path;
+    applyPatentAdministrativeMetadataToDataset(payload);
+    entry.json_ordered = payload;
     changed = true;
   }
 
